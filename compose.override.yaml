@@ -1,0 +1,14 @@
+services:
+  glpi:
+    # Resolve the local Agent URL over the private link so B sees A's address.
+    extra_hosts:
+      - "host.docker.internal:172.30.250.3"
+    networks:
+      default:
+      asset_sync:
+        ipv4_address: 172.30.250.2
+
+networks:
+  asset_sync:
+    name: glpi-asset-sync
+    external: true
