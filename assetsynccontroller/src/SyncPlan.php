@@ -17,6 +17,20 @@ class SyncPlan
         array $flags = [],
     ): array
     {
+        // Route and mapping changes share this lock with dispatch, including the writes on both GLPI instances.
+        return RouteSettings::withLock((int) $route['id'],
+            static fn(): array => self::processLocked($agent, $asset, $route, $mappings, $entry, $flags), 3);
+    }
+
+    private static function processLocked(
+        AgentApi $agent,
+        CommonDBTM $asset,
+        array $route,
+        array $mappings,
+        array $entry,
+        array $flags,
+    ): array
+    {
         $routeMappings = $mappings;
         $mappings = SyncChanges::selectMappings($mappings, $entry['pending_fields'] ?? null);
         $previous = json_decode($entry['field_snapshot'] ?? '[]', true) ?? [];
@@ -34,6 +48,7 @@ class SyncPlan
             'entity_id' => (int) $route['agent_entity_id'],
             'serial' => $entry['serial'],
         ];
+        self::recheckConfiguration($route, $entry['asset_type'], $routeMappings, $flags);
         $probe = $agent->syncAsset($identity + [
             'operation' => 'probe',
             'fields' => array_values($fieldsB + $flagFields),
@@ -362,20 +377,14 @@ class SyncPlan
         array $flags,
     ): void
     {
-        if (SyncRunner::getConnection($route) === null
-            || !$asset->getFromDB($entry['assets_id'])
+        self::recheckConfiguration($route, $entry['asset_type'], $mappings, $flags);
+        if (!$asset->getFromDB($entry['assets_id'])
             || (int) $asset->fields['entities_id'] !== (int) $route['controller_entity_id']
             || !empty($asset->fields['is_deleted']) || !empty($asset->fields['is_template'])
             || trim((string) $asset->fields['serial']) !== $entry['serial'])
         {
             throw new SyncProblem('The route, connection, or source asset changed during sync.');
         }
-        if ($mappings !== SyncRunner::getMappings((int) $route['id'], $entry['asset_type'])
-            || $flags !== SyncFlags::get((int) $route['id'], $entry['asset_type']))
-        {
-            throw new SyncProblem('The field mappings changed during sync. The asset will be retried.');
-        }
-
         $now = SyncFields::read($asset, array_values($fields));
         foreach ($before as $id => $field)
         {
@@ -383,6 +392,19 @@ class SyncPlan
             {
                 throw new SyncProblem('A mapped field was edited on GLPI A during sync. It will be retried.');
             }
+        }
+    }
+
+    private static function recheckConfiguration(array $route, string $assetType, array $mappings, array $flags): void
+    {
+        if (SyncRunner::getConnection($route) === null)
+        {
+            throw new SyncProblem('The route or connection changed during sync.');
+        }
+        $routeId = (int) $route['id'];
+        if ($mappings !== SyncRunner::getMappings($routeId, $assetType) || $flags !== SyncFlags::get($routeId, $assetType))
+        {
+            throw new SyncProblem('The field mappings changed during sync.');
         }
     }
 

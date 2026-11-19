@@ -4,8 +4,10 @@ use Glpi\Search\SearchOption;
 use GlpiPlugin\Assetsynccontroller\AgentApi;
 use GlpiPlugin\Assetsynccontroller\MappingFields;
 use GlpiPlugin\Assetsynccontroller\Menu;
+use GlpiPlugin\Assetsynccontroller\RouteSettings;
 use GlpiPlugin\Assetsynccontroller\SyncFields;
 use GlpiPlugin\Assetsynccontroller\SyncFlags;
+use GlpiPlugin\Assetsynccontroller\SyncProblem;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 global $CFG_GLPI, $DB;
@@ -115,11 +117,31 @@ if ($route !== null && $hasAssetType)
         {
             throw new BadRequestHttpException('Invalid field pair.');
         }
-        $DB->delete($mappingsTable, $mappingKey + [
-            'controller_option_id' => $controllerOptionId,
-            'agent_option_id' => $agentOptionId,
-        ]);
-        Session::addMessageAfterRedirect('Mapping removed.');
+        try
+        {
+            RouteSettings::withLock($routeId, static function () use (
+                $DB, $routesTable, $routeId, $activeEntityIds, $mappingsTable, $mappingKey, $controllerOptionId, $agentOptionId
+            ): void
+            {
+                // The route may have moved to another entity while this request waited for a running sync.
+                if (!$DB->request([
+                    'SELECT' => ['id'], 'FROM' => $routesTable,
+                    'WHERE' => ['id' => $routeId, 'controller_entity_id' => $activeEntityIds],
+                ])->current())
+                {
+                    throw new SyncProblem('This route is no longer available in your current scope.');
+                }
+                $DB->delete($mappingsTable, $mappingKey + [
+                    'controller_option_id' => $controllerOptionId,
+                    'agent_option_id' => $agentOptionId,
+                ]);
+            }, 8);
+            Session::addMessageAfterRedirect('Mapping removed.');
+        }
+        catch (SyncProblem $problem)
+        {
+            Session::addMessageAfterRedirect($problem->getMessage(), false, ERROR);
+        }
         Html::redirect($selectionUrl, 303);
     }
 

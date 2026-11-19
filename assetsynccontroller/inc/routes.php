@@ -2,7 +2,10 @@
 
 use GlpiPlugin\Assetsynccontroller\AgentApi;
 use GlpiPlugin\Assetsynccontroller\Menu;
+use GlpiPlugin\Assetsynccontroller\RouteSettings;
+use GlpiPlugin\Assetsynccontroller\SyncProblem;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 global $CFG_GLPI, $DB;
 
@@ -11,11 +14,12 @@ $routesTable = PLUGIN_ASSETSYNCCONTROLLER_ROUTES_TABLE;
 $connectionsTable = PLUGIN_ASSETSYNCCONTROLLER_CONNECTIONS_TABLE;
 $canManageRoutes = Session::haveRight(Config::$rightname, UPDATE);
 $isPost = $_SERVER['REQUEST_METHOD'] === 'POST';
-$action = $isPost ? ($_POST['route_action'] ?? '') : ($_GET['route_action'] ?? '');
+$input = $isPost ? $_POST : $_GET;
+$action = $input['route_action'] ?? '';
 if ($isPost || $action !== '')
 {
     Session::checkRight(Config::$rightname, UPDATE);
-    $allowedActions = $isPost ? ['load', 'save'] : ['add'];
+    $allowedActions = $isPost ? ['load', 'save', 'delete'] : ['add', 'edit', 'delete'];
     if (!in_array($action, $allowedActions, true))
     {
         throw new BadRequestHttpException('Unknown route action.');
@@ -47,11 +51,82 @@ $controllerEntityId = false;
 $agentEntityId = false;
 $selectedAssetTypes = [];
 $isEnabled = '0';
+$editingRoute = null;
+$routeToDelete = null;
+$routeId = null;
+$routeToken = '';
+
+if (in_array($action, ['edit', 'delete'], true)
+    || ($isPost && array_key_exists('route_id', $input)))
+{
+    $routeId = filter_var($input['route_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    if ($routeId === false || $controllerEntities === [])
+    {
+        throw new NotFoundHttpException('Route not found.');
+    }
+    $currentRoute = $DB->request([
+        'FROM' => $routesTable,
+        'WHERE' => ['id' => $routeId, 'controller_entity_id' => array_keys($controllerEntities)],
+    ])->current();
+    if (!$currentRoute)
+    {
+        throw new NotFoundHttpException('Route not found.');
+    }
+
+    // Detect another administrator's edit while this form was open.
+    $routeToken = hash('sha256', json_encode($currentRoute, JSON_THROW_ON_ERROR));
+    if ($isPost && $routeToken !== ($input['route_token'] ?? null))
+    {
+        $error = 'The route changed while the form was open. Review the current settings and try again.';
+    }
+    if ($action === 'delete')
+    {
+        $routeToDelete = $currentRoute;
+    }
+    else
+    {
+        $editingRoute = $currentRoute;
+        $selectedConnectionId = isset($currentRoute['connections_id']) ? (int) $currentRoute['connections_id'] : false;
+        $controllerEntityId = (int) $currentRoute['controller_entity_id'];
+        $agentEntityId = (int) $currentRoute['agent_entity_id'];
+        $selectedAssetTypes = array_keys(json_decode($currentRoute['asset_types'], true, flags: JSON_THROW_ON_ERROR));
+        $isEnabled = (string) $currentRoute['is_enabled'];
+    }
+}
+
+if ($isPost && $action === 'delete')
+{
+    if (($input['confirm_delete'] ?? '') !== '1')
+    {
+        throw new BadRequestHttpException('Confirm route deletion.');
+    }
+    if ($error === '')
+    {
+        try
+        {
+            if (RouteSettings::delete($routeToDelete))
+            {
+                Session::addMessageAfterRedirect('Route and related mappings deleted.');
+                Html::redirect($routesUrl, 303);
+            }
+            $error = 'The route changed before it could be deleted. Reload the route and try again.';
+        }
+        catch (SyncProblem $problem)
+        {
+            $error = $problem->getMessage();
+        }
+    }
+}
 
 // Loading options and rechecking them on save both require a user-triggered POST.
-if ($isPost)
+if ($isPost && $action !== 'delete' && $error === '')
 {
     $selectedConnectionId = filter_var($_POST['connection_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    if ($editingRoute && $selectedConnectionId !== (int) $editingRoute['connections_id'])
+    {
+        // Entity IDs on different GLPI connections do not identify the same entity.
+        $agentEntityId = false;
+    }
     if ($selectedConnectionId !== false)
     {
         $connection = $DB->request([
@@ -136,7 +211,7 @@ if ($action === 'save' && $agentOptions !== null)
     else
     {
         // Store the revision that was actually checked. A later edit makes this route Pending.
-        $DB->insert($routesTable, [
+        $values = [
             'connections_id' => $connection['id'],
             'connection_name' => $connection['name'],
             'connection_revision' => $connection['settings_revision'],
@@ -145,9 +220,26 @@ if ($action === 'save' && $agentOptions !== null)
             'agent_entity_name' => $agentOptions['entities'][$agentEntityId],
             'asset_types' => json_encode($validAssetTypes, JSON_THROW_ON_ERROR),
             'is_enabled' => (int) $isEnabled,
-        ]);
-        Session::addMessageAfterRedirect('Route added.');
-        Html::redirect($routesUrl, 303);
+        ];
+        if ($editingRoute === null)
+        {
+            $DB->insert($routesTable, $values);
+            Session::addMessageAfterRedirect('Route added.');
+            Html::redirect($routesUrl, 303);
+        }
+        try
+        {
+            if (RouteSettings::update($editingRoute, $values))
+            {
+                Session::addMessageAfterRedirect('Route updated.');
+                Html::redirect($routesUrl, 303);
+            }
+            $error = 'The route or connection changed before the update was saved. Reload the route and try again.';
+        }
+        catch (SyncProblem $problem)
+        {
+            $error = $problem->getMessage();
+        }
     }
 }
 
@@ -168,7 +260,7 @@ if ($action === '')
         ]);
     }
 }
-else
+elseif ($routeToDelete === null)
 {
     // The selector only needs display names and IDs.
     $savedConnections = $DB->request([
@@ -176,5 +268,5 @@ else
         'FROM' => $connectionsTable,
         'ORDER' => ['name', 'id'],
     ]);
-    $csrfToken = Session::getNewCSRFToken();
 }
+$csrfToken = $canManageRoutes ? Session::getNewCSRFToken() : '';

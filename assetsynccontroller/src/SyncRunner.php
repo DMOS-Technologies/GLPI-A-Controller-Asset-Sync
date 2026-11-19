@@ -117,14 +117,17 @@ class SyncRunner
             foreach ($targets as $target)
             {
                 $route = $target['route'];
-                $connection = self::getConnection($route);
-                if ($connection === null)
-                {
-                    continue;
-                }
                 try
                 {
-                    SyncChanges::collect($target, self::openAgent($connection, $agents));
+                    RouteSettings::withLock((int) $route['id'], static function () use ($route, $target, &$agents): void
+                    {
+                        $connection = self::getConnection($route);
+                        if ($connection !== null
+                            && $target['mappings'] === self::getMappings((int) $route['id'], $target['type']))
+                        {
+                            SyncChanges::collect($target, self::openAgent($connection, $agents));
+                        }
+                    });
                 }
                 catch (Throwable)
                 {
@@ -311,48 +314,72 @@ class SyncRunner
         $routesTable = PLUGIN_ASSETSYNCCONTROLLER_ROUTES_TABLE;
         $connectionsTable = PLUGIN_ASSETSYNCCONTROLLER_CONNECTIONS_TABLE;
         $targets = [];
-        $routes = $DB->request([
-            'SELECT' => ["$routesTable.*", "$connectionsTable.settings_revision AS current_revision",
-                "$connectionsTable.is_enabled AS connection_enabled"],
-            'FROM' => $routesTable,
-            'LEFT JOIN' => [$connectionsTable => ['ON' => [$routesTable => 'connections_id', $connectionsTable => 'id']]],
-        ]);
-        foreach ($routes as $route)
+        foreach ($DB->request(['SELECT' => ['id'], 'FROM' => $routesTable]) as $row)
         {
-            if (!count($DB->request(['SELECT' => ['id'], 'FROM' => Entity::getTable(),
-                'WHERE' => ['id' => $route['controller_entity_id']]])))
+            try
+            {
+                RouteSettings::withLock((int) $row['id'], static function () use ($DB, $routesTable, $connectionsTable, $row, &$targets): void
+                {
+                    // Read the route inside the lock. Inventory from an older scope must not refill cleared rows.
+                    $route = $DB->request([
+                        'SELECT' => ["$routesTable.*", "$connectionsTable.settings_revision AS current_revision",
+                            "$connectionsTable.is_enabled AS connection_enabled"],
+                        'FROM' => $routesTable,
+                        'LEFT JOIN' => [$connectionsTable => ['ON' => [$routesTable => 'connections_id', $connectionsTable => 'id']]],
+                        'WHERE' => ["$routesTable.id" => $row['id']],
+                    ])->current();
+                    if ($route)
+                    {
+                        $targets += self::discoverRoute($route);
+                    }
+                });
+            }
+            catch (SyncProblem)
+            {
+                // An administrator is editing this route. A later run will rediscover it.
+            }
+        }
+        return $targets;
+    }
+
+    private static function discoverRoute(array $route): array
+    {
+        global $DB;
+
+        $targets = [];
+        if (!count($DB->request(['SELECT' => ['id'], 'FROM' => Entity::getTable(),
+            'WHERE' => ['id' => $route['controller_entity_id']]])))
+        {
+            return $targets;
+        }
+
+        foreach (array_keys(json_decode($route['asset_types'], true) ?? []) as $type)
+        {
+            $criteria = self::assetCriteria($type, (int) $route['controller_entity_id']);
+            if ($criteria === null)
             {
                 continue;
             }
 
-            foreach (array_keys(json_decode($route['asset_types'], true) ?? []) as $type)
+            $mappings = self::getMappings((int) $route['id'], $type);
+            $blocked = null;
+            if (!$route['is_enabled'])
             {
-                $criteria = self::assetCriteria($type, (int) $route['controller_entity_id']);
-                if ($criteria === null)
-                {
-                    continue;
-                }
+                $blocked = 'The route is disabled.';
+            }
+            elseif (!$route['connection_enabled'] || (int) $route['connection_revision'] !== (int) $route['current_revision'])
+            {
+                $blocked = 'The connection is disabled or the route is Pending.';
+            }
+            elseif ($mappings === [])
+            {
+                $blocked = 'No fields are mapped for this asset type.';
+            }
 
-                $mappings = self::getMappings((int) $route['id'], $type);
-                $blocked = null;
-                if (!$route['is_enabled'])
-                {
-                    $blocked = 'The route is disabled.';
-                }
-                elseif (!$route['connection_enabled'] || (int) $route['connection_revision'] !== (int) $route['current_revision'])
-                {
-                    $blocked = 'The connection is disabled or the route is Pending.';
-                }
-                elseif ($mappings === [])
-                {
-                    $blocked = 'No fields are mapped for this asset type.';
-                }
-
-                self::refreshInventory($route, $type, $criteria, $blocked);
-                if ($blocked === null)
-                {
-                    $targets[$route['id'] . ':' . $type] = ['route' => $route, 'type' => $type, 'criteria' => $criteria, 'mappings' => $mappings];
-                }
+            self::refreshInventory($route, $type, $criteria, $blocked);
+            if ($blocked === null)
+            {
+                $targets[$route['id'] . ':' . $type] = ['route' => $route, 'type' => $type, 'criteria' => $criteria, 'mappings' => $mappings];
             }
         }
         return $targets;

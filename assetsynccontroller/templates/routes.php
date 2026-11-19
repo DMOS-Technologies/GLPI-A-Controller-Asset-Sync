@@ -1,6 +1,7 @@
 <?php
 
 $listUrl = htmlescape($routesUrl);
+$formUrl = $listUrl . ($editingRoute === null ? '&amp;route_action=add' : '&amp;route_action=edit&amp;route_id=' . (int) $editingRoute['id']);
 ?>
 
 <section class="card mt-3" aria-label="Routes">
@@ -19,11 +20,14 @@ $listUrl = htmlescape($routesUrl);
                         <th scope="col">Connection name</th>
                         <th scope="col">Sync status</th>
                         <th scope="col">Setting Status</th>
+                        <?php if ($canManageRoutes): ?>
+                            <th scope="col">Actions</th>
+                        <?php endif; ?>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if (count($routes) === 0): ?>
-                        <tr><td colspan="3">No routes yet.</td></tr>
+                        <tr><td colspan="<?= $canManageRoutes ? 4 : 3 ?>">No routes yet.</td></tr>
                     <?php endif; ?>
                     <?php foreach ($routes as $route): ?>
                         <?php
@@ -53,20 +57,49 @@ $listUrl = htmlescape($routesUrl);
                                     <?= $verified ? 'Verified' : 'Pending' ?>
                                 </span>
                             </td>
+                            <?php if ($canManageRoutes): ?>
+                                <td>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <a class="btn btn-sm btn-outline-primary" href="<?= $listUrl ?>&amp;route_action=edit&amp;route_id=<?= (int) $route['id'] ?>">Edit</a>
+                                        <a class="btn btn-sm btn-outline-danger" href="<?= $listUrl ?>&amp;route_action=delete&amp;route_id=<?= (int) $route['id'] ?>">Delete</a>
+                                    </div>
+                                </td>
+                            <?php endif; ?>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
             </table>
         </div>
+    <?php elseif ($routeToDelete !== null): ?>
+        <div class="card-body">
+            <h2 class="card-title">Delete route #<?= (int) $routeToDelete['id'] ?></h2>
+            <p>
+                <?= htmlescape($controllerEntities[$routeToDelete['controller_entity_id']]) ?>
+                &rarr; <?= htmlescape($routeToDelete['agent_entity_name']) ?>
+            </p>
+            <?php if ($error !== ''): ?>
+                <div class="alert alert-danger" role="alert"><?= htmlescape($error) ?></div>
+            <?php endif; ?>
+            <p>Deleting this route also deletes its mappings and queue entries.</p>
+            <form method="post" action="<?= $listUrl ?>">
+                <input type="hidden" name="_glpi_csrf_token" value="<?= htmlescape($csrfToken) ?>">
+                <input type="hidden" name="route_action" value="delete">
+                <input type="hidden" name="route_id" value="<?= (int) $routeToDelete['id'] ?>">
+                <input type="hidden" name="route_token" value="<?= htmlescape($routeToken) ?>">
+                <input type="hidden" name="confirm_delete" value="1">
+                <button type="submit" class="btn btn-danger">Delete route</button>
+                <a href="<?= $listUrl ?>" class="btn btn-outline-secondary">Cancel</a>
+            </form>
+        </div>
     <?php else: ?>
         <div class="card-body">
-            <h2 class="card-title">Add route</h2>
+            <h2 class="card-title"><?= $editingRoute === null ? 'Add route' : 'Edit route #' . (int) $editingRoute['id'] ?></h2>
             <?php if ($error !== ''): ?>
                 <div class="alert alert-danger" role="alert"><?= htmlescape($error) ?></div>
             <?php endif; ?>
 
             <?php if (count($savedConnections) === 0): ?>
-                <p>Add a connection before creating a route.</p>
+                <p>Add a connection before saving a route.</p>
                 <a href="?section=connections" class="btn btn-primary">Go to Connections</a>
                 <a href="<?= $listUrl ?>" class="btn btn-outline-secondary">Cancel</a>
             <?php elseif ($controllerEntities === []): ?>
@@ -76,6 +109,10 @@ $listUrl = htmlescape($routesUrl);
                 <form method="post" action="<?= $listUrl ?>">
                     <input type="hidden" name="_glpi_csrf_token" value="<?= htmlescape($csrfToken) ?>">
                     <input type="hidden" name="route_action" value="load">
+                    <?php if ($editingRoute !== null): ?>
+                        <input type="hidden" name="route_id" value="<?= (int) $editingRoute['id'] ?>">
+                        <input type="hidden" name="route_token" value="<?= htmlescape($routeToken) ?>">
+                    <?php endif; ?>
                     <div class="mb-3">
                         <label class="form-label" for="route-connection">Connection name</label>
                         <select class="form-select" name="connection_id" id="route-connection" required>
@@ -94,12 +131,16 @@ $listUrl = htmlescape($routesUrl);
             <?php else: ?>
                 <div class="mb-3">
                     <strong><?= htmlescape($connection['name']) ?></strong>
-                    <a href="<?= $listUrl ?>&amp;route_action=add" class="ms-2">Change connection</a>
+                    <a href="<?= $formUrl ?>" class="ms-2">Change connection</a>
                 </div>
                 <form method="post" action="<?= $listUrl ?>">
                     <input type="hidden" name="_glpi_csrf_token" value="<?= htmlescape($csrfToken) ?>">
                     <input type="hidden" name="route_action" value="save">
                     <input type="hidden" name="connection_id" value="<?= (int) $connection['id'] ?>">
+                    <?php if ($editingRoute !== null): ?>
+                        <input type="hidden" name="route_id" value="<?= (int) $editingRoute['id'] ?>">
+                        <input type="hidden" name="route_token" value="<?= htmlescape($routeToken) ?>">
+                    <?php endif; ?>
 
                     <div class="mb-3">
                         <label class="form-label" for="route-controller-entity">GLPI Entity from A (Controller)</label>
@@ -145,7 +186,14 @@ $listUrl = htmlescape($routesUrl);
                             <?php endforeach; ?>
                         </div>
                     </fieldset>
-                    <button type="submit" class="btn btn-primary">Add route</button>
+                    <?php if ($editingRoute !== null): ?>
+                        <p class="form-hint">
+                            Removing an asset type deletes its mappings, flags, and queued work.
+                            Selecting a different connection clears the route's mappings and flags.
+                            Changing the connection or either entity restarts sync discovery for the route.
+                        </p>
+                    <?php endif; ?>
+                    <button type="submit" class="btn btn-primary"><?= $editingRoute === null ? 'Add route' : 'Save route' ?></button>
                     <a href="<?= $listUrl ?>" class="btn btn-outline-secondary">Cancel</a>
                 </form>
             <?php endif; ?>
