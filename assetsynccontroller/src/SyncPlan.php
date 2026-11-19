@@ -4,6 +4,7 @@ namespace GlpiPlugin\Assetsynccontroller;
 
 use CommonDBTM;
 use DBmysql;
+use Generator;
 use Throwable;
 
 class SyncPlan
@@ -18,18 +19,32 @@ class SyncPlan
     ): array
     {
         // Route and mapping changes share this lock with dispatch, including the writes on both GLPI instances.
-        return RouteSettings::withLock((int) $route['id'],
-            static fn(): array => self::processLocked($agent, $asset, $route, $mappings, $entry, $flags), 3);
+        return RouteSettings::withLock((int) $route['id'], static function () use (
+            $agent, $asset, $route, $mappings, $entry, $flags
+        ): array
+        {
+            $steps = self::steps($asset, $route, $mappings, $entry, $flags);
+            while ($steps->valid())
+            {
+                $steps->send($agent->syncAsset($steps->current()));
+            }
+            return $steps->getReturn();
+        }, 3);
     }
 
-    private static function processLocked(
-        AgentApi $agent,
+    /**
+     * Yield each Agent B request and accept its individual response from the transport.
+     * The caller holds the route lock until this asset plan finishes.
+     *
+     * @return Generator<int, array, ?array, array>
+     */
+    public static function steps(
         CommonDBTM $asset,
         array $route,
         array $mappings,
         array $entry,
-        array $flags,
-    ): array
+        array $flags = [],
+    ): Generator
     {
         $routeMappings = $mappings;
         $mappings = SyncChanges::selectMappings($mappings, $entry['pending_fields'] ?? null);
@@ -49,7 +64,7 @@ class SyncPlan
             'serial' => $entry['serial'],
         ];
         self::recheckConfiguration($route, $entry['asset_type'], $routeMappings, $flags);
-        $probe = $agent->syncAsset($identity + [
+        $probe = yield ($identity + [
             'operation' => 'probe',
             'fields' => array_values($fieldsB + $flagFields),
             'include_error_details' => true,
@@ -236,7 +251,7 @@ class SyncPlan
 
             // An explicit mapping already handles this source reference, even if the B option ID differs.
             $initial = $create ? SyncFields::populatedNativeReferences($asset, $fieldsA + $writeB) : [];
-            $result = $agent->syncAsset($identity + [
+            $result = yield ($identity + [
                 'operation' => 'apply',
                 'create' => $create,
                 'expected_asset_id' => $expectedAssetId,
@@ -508,6 +523,7 @@ class SyncPlan
             'invalid_field_value', 'invalid_reference_value' => 'Agent B rejected a value for the destination field type.',
             'asset_changed', 'asset_identity_changed', 'asset_busy' => 'The asset changed or is busy on Agent B. It will be retried.',
             'entity_not_allowed' => 'The Agent B account cannot access the mapped GLPI B entity.',
+            'batch_payload_too_large' => 'The mapped data for this asset exceeds the Agent B batch request limit.',
             default => 'Agent B did not acknowledge this sync request.',
         };
         // The Agent identifies a failed option. Its name and planned value come from this request.

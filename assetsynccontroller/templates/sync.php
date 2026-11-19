@@ -59,6 +59,29 @@
                 <div class="mt-3"><?php require __DIR__ . '/sync-actions.php'; ?></div>
             <?php endif; ?>
         <?php endif; ?>
+
+        <?php if ($route !== null): ?>
+            <section class="border-top mt-3 pt-3" aria-labelledby="sync-route-totals">
+                <h2 class="h4 mb-2" id="sync-route-totals">Route totals</h2>
+                <dl class="d-flex flex-wrap gap-3 gap-lg-4 mb-2">
+                    <div>
+                        <dt>Total assets</dt>
+                        <dd class="fs-4 fw-bold mb-0"><?= number_format($syncAssetTotal) ?></dd>
+                    </div>
+                    <div>
+                        <dt>Assets left</dt>
+                        <dd class="fs-4 fw-bold mb-0"><?= number_format($syncAssetsLeft) ?></dd>
+                    </div>
+                    <?php foreach ($syncStatuses as $status => $details): ?>
+                        <div>
+                            <dt class="fw-normal"><?= htmlescape($details['label']) ?></dt>
+                            <dd class="mb-0"><span class="badge <?= $details['badge'] ?>"><?= number_format($syncStatusCounts[$status] ?? 0) ?></span></dd>
+                        </div>
+                    <?php endforeach; ?>
+                </dl>
+                <p class="text-secondary mb-0">Totals cover the selected route, regardless of filters. Assets left includes failed and cancelled assets.</p>
+            </section>
+        <?php endif; ?>
     </div>
 
     <?php if ($route !== null): ?>

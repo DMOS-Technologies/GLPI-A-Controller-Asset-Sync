@@ -6,6 +6,9 @@ use GLPIKey;
 
 class AgentApi
 {
+    private const MAX_BATCH_BYTES = 16 * 1024 * 1024;
+    private const MAX_BATCH_ITEMS = 100;
+
     private function __construct(private string $baseUrl, private array $sessionHeaders)
     {
     }
@@ -58,7 +61,7 @@ class AgentApi
         return self::get($this->baseUrl . '/killSession', $this->sessionHeaders) !== null;
     }
 
-    public function syncAsset(array $request): ?array
+    public function syncAsset(array $request, int $maxBytes = 1048576, int $timeout = 5): ?array
     {
         // The saved URL points at GLPI's REST API. The Agent action is on the same origin.
         $glpiUrl = preg_replace('~/(?:apirest\.php|api\.php/v1)$~i', '', $this->baseUrl, 1, $matched);
@@ -70,11 +73,68 @@ class AgentApi
         $response = self::get(
             $glpiUrl . '/plugins/assetsyncagent/front/sync.php',
             $this->sessionHeaders,
-            1048576,
+            $maxBytes,
             $request,
+            $timeout,
         );
         $result = json_decode($response ?? '', true);
         return is_array($result) ? $result : null;
+    }
+
+    public function syncBatch(array $requests): array
+    {
+        $results = [];
+        $batch = [];
+        $overhead = strlen('{"operation":"batch","requests":[]}');
+        $bytes = $overhead;
+        foreach ($requests as $request)
+        {
+            $itemBytes = strlen(json_encode($request, JSON_THROW_ON_ERROR));
+            if ($itemBytes + $overhead > self::MAX_BATCH_BYTES)
+            {
+                $results[$request['c_id']] = ['ok' => false, 'error' => 'batch_payload_too_large'];
+                continue;
+            }
+
+            // Only unusually large payloads need to be split before reaching 100 assets.
+            if (count($batch) === self::MAX_BATCH_ITEMS || $bytes + $itemBytes + 1 > self::MAX_BATCH_BYTES)
+            {
+                $results += $this->sendBatch($batch);
+                $batch = [];
+                $bytes = $overhead;
+            }
+            $bytes += $itemBytes + ($batch === [] ? 0 : 1);
+            $batch[] = $request;
+        }
+        if ($batch !== [])
+        {
+            $results += $this->sendBatch($batch);
+        }
+        return $results;
+    }
+
+    private function sendBatch(array $requests): array
+    {
+        // A missing or invalid acknowledgement fails only the corresponding queue entry.
+        $results = array_fill_keys(array_column($requests, 'c_id'), null);
+        $response = $this->syncAsset(['operation' => 'batch', 'requests' => $requests], self::MAX_BATCH_BYTES, 50);
+        if (($response['ok'] ?? false) !== true || !is_array($response['results'] ?? null)
+            || !array_is_list($response['results']))
+        {
+            return $results;
+        }
+        $seen = [];
+        foreach ($response['results'] as $result)
+        {
+            $id = $result['c_id'] ?? null;
+            if (!is_int($id) || !array_key_exists($id, $results))
+            {
+                continue;
+            }
+            $results[$id] = !isset($seen[$id]) && is_bool($result['ok'] ?? null) ? $result : null;
+            $seen[$id] = true;
+        }
+        return $results;
     }
 
     public function getFieldOptions(string $itemType): ?array
@@ -131,7 +191,7 @@ class AgentApi
     }
 
     // Return the body for HTTP 200, or null for any failure. Remote errors may contain secrets.
-    private static function get(string $url, array $headers, int $maxBytes = 65536, ?array $payload = null): ?string
+    private static function get(string $url, array $headers, int $maxBytes = 65536, ?array $payload = null, int $timeout = 5): ?string
     {
         $request = curl_init($url);
         if ($request === false)
@@ -148,7 +208,7 @@ class AgentApi
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => 3,
-            CURLOPT_TIMEOUT => 5,
+            CURLOPT_TIMEOUT => $timeout,
             CURLOPT_WRITEFUNCTION => static function ($request, string $chunk) use (&$body, $maxBytes): int
             {
                 if (strlen($body) + strlen($chunk) > $maxBytes)

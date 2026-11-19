@@ -168,133 +168,240 @@ class SyncRunner
             'id' => array_column($batch, 'id'),
             'status' => 'pending',
         ]);
-        $attempted = 0;
-        $started = hrtime(true);
+        $groups = [];
         foreach ($batch as $entry)
         {
-            // Keep slow connections from holding up the minute worker for an entire large batch.
+            $route = $targets[$entry['routes_id'] . ':' . $entry['asset_type']]['route'];
+            $groups[$route['connections_id'] . ':' . $route['connection_revision']][] = $entry;
+        }
+
+        $attempted = 0;
+        $started = hrtime(true);
+        foreach ($groups as $entries)
+        {
+            // Leave unstarted groups queued when the worker's time budget runs out.
             if (hrtime(true) - $started >= 50_000_000_000)
             {
                 break;
             }
-            ++$attempted;
-            $target = $targets[$entry['routes_id'] . ':' . $entry['asset_type']];
-            // Check the queue status and request together. A cancelled or replaced row cannot dispatch.
+            $routeIds = array_values(array_unique(array_map('intval', array_column($entries, 'routes_id'))));
+            sort($routeIds, SORT_NUMERIC);
+            $attempted += self::withBatchRoutes($routeIds, static function (array $locked) use ($entries, $targets, &$agents): int
+            {
+                return self::runConnectionBatch($entries, $targets, $locked, $agents);
+            });
+        }
+        return $attempted;
+    }
+
+    private static function withBatchRoutes(array $routeIds, callable $run, array $locked = []): int
+    {
+        if ($routeIds === [])
+        {
+            return $run($locked);
+        }
+
+        $routeId = array_shift($routeIds);
+        $acquired = false;
+        try
+        {
+            return RouteSettings::withLock($routeId, static function () use ($routeIds, $run, $locked, $routeId, &$acquired): int
+            {
+                $acquired = true;
+                $locked[$routeId] = true;
+                return self::withBatchRoutes($routeIds, $run, $locked);
+            });
+        }
+        catch (SyncProblem $problem)
+        {
+            if ($acquired)
+            {
+                throw $problem;
+            }
+            // An administrator is editing this route; other routes can still use the batch.
+            return self::withBatchRoutes($routeIds, $run, $locked);
+        }
+    }
+
+    private static function runConnectionBatch(array $entries, array $targets, array $locked, array &$agents): int
+    {
+        global $DB;
+
+        $table = PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE;
+        $steps = [];
+        $agent = null;
+        $attempted = 0;
+        foreach ($entries as $entry)
+        {
+            if (!isset($locked[$entry['routes_id']]))
+            {
+                continue;
+            }
             $where = [
-                'id' => $entry['id'],
-                'serial' => $entry['serial'],
-                'status' => 'queued',
-                'pending_fields' => $entry['pending_fields'],
+                'id' => $entry['id'], 'serial' => $entry['serial'],
+                'status' => 'queued', 'pending_fields' => $entry['pending_fields'],
             ];
             try
             {
+                $target = $targets[$entry['routes_id'] . ':' . $entry['asset_type']];
                 $route = $target['route'];
                 $connection = self::getConnection($route);
                 if ($connection === null)
                 {
                     throw new SyncProblem('The route or connection is disabled or its settings changed.');
                 }
-
-                $type = $entry['asset_type'];
-                $asset = new $type();
-                if (!$asset->getFromDB($entry['assets_id'])
-                    || (int) $asset->fields['entities_id'] !== (int) $route['controller_entity_id']
-                    || !empty($asset->fields['is_deleted']) || !empty($asset->fields['is_template'])
-                    || trim((string) $asset->fields['serial']) !== $entry['serial'])
-                {
-                    throw new SyncProblem('The asset or its serial number changed on GLPI A.');
-                }
-
-                // Multiple live A records with the same serial would target one B record.
-                $duplicates = $DB->request([
-                    'SELECT' => ['id'],
-                    'FROM' => $type::getTable(),
-                    'WHERE' => $target['criteria'] + ['RAW' => ['TRIM(serial)' => $entry['serial']]],
-                    'LIMIT' => 2,
-                ]);
-                if (count($duplicates) !== 1)
-                {
-                    throw new SyncProblem('The serial number is ambiguous in the mapped GLPI A entity.');
-                }
-
-                $agent = self::openAgent($connection, $agents);
+                $asset = self::loadQueuedAsset($entry, $target);
+                $agent ??= self::openAgent($connection, $agents);
                 if ($agent === null)
                 {
                     throw new SyncProblem('Could not authenticate to Agent B.');
                 }
+                $flags = SyncFlags::get((int) $route['id'], $entry['asset_type']);
+                $plan = SyncPlan::steps($asset, $route, $target['mappings'], $entry, $flags);
+                $plan->current();
 
-                $flags = SyncFlags::get((int) $route['id'], $type);
-                $DB->update($syncTable, [
-                    'status' => 'processing',
-                    'last_attempt' => QueryFunction::now(),
-                ], $where);
+                // Cancel and dispatch compete on the same conditional queue update.
+                $DB->update($table, ['status' => 'processing', 'last_attempt' => QueryFunction::now()], $where);
                 if ($DB->affectedRows() === 0)
                 {
-                    --$attempted;
                     continue;
                 }
+                ++$attempted;
                 $where['status'] = 'processing';
-                $result = SyncPlan::process($agent, $asset, $route, $target['mappings'], $entry, $flags);
-                $status = [
-                    'status' => 'finished',
-                    'last_error' => null,
-                    'last_error_details' => null,
-                    'pending_fields' => null,
-                    'field_snapshot' => json_encode($result['snapshot'], JSON_THROW_ON_ERROR),
-                ];
-                if ($result['direction'] !== null)
+                if (!$plan->valid())
                 {
-                    $status['sync_direction'] = $result['direction'];
+                    self::finishEntry($plan->getReturn(), $where);
+                    continue;
                 }
-                $DB->update($syncTable, $status, $where);
-                if ($DB->affectedRows() === 0)
+                $steps[(int) $entry['id']] = ['plan' => $plan, 'where' => $where];
+            }
+            catch (Throwable $error)
+            {
+                $failed = self::failEntry($error, $where);
+                if ($where['status'] === 'queued')
                 {
-                    // Keep the completed transfer's baseline if another request queued the same serial.
-                    unset($status['status'], $status['last_error'], $status['last_error_details'], $status['pending_fields']);
-                    $serial = \DBmysql::quoteValue($entry['serial']);
-                    $DB->update($syncTable, $status, [
-                        'id' => $entry['id'],
-                        'status' => 'queued',
-                        new QueryExpression("BINARY serial = BINARY $serial"),
-                    ]);
+                    $attempted += $failed;
                 }
             }
-            catch (SyncProblem $problem)
+        }
+
+        // The first batch reads B. Only assets requiring another request enter the apply batch.
+        while ($steps !== [])
+        {
+            $requests = [];
+            foreach ($steps as $id => $step)
             {
-                $DB->update($syncTable, [
-                    'status' => 'failed',
-                    'last_attempt' => QueryFunction::now(),
-                    'last_error' => $problem->getMessage(),
-                    'last_error_details' => $problem->details === [] ? null
-                        : json_encode($problem->details, JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR),
-                ], $where);
+                $requests[] = ['c_id' => $id] + $step['plan']->current();
             }
-            catch (SyncException $problem)
+            try
             {
-                $message = match ($problem->getMessage()) {
-                    'field_unavailable', 'field_read_only' => 'GLPI A could not read or write a mapped field.',
-                    'reference_unavailable', 'invalid_reference_value' => 'GLPI A could not resolve a mapped dropdown value in the route entity.',
-                    'invalid_field_value' => 'A mapped value is incompatible with the destination field type.',
-                    'notes_write_failed' => 'GLPI A did not retain a copied Notes record.',
-                    default => 'GLPI A could not apply a mapped field value.',
-                };
-                $DB->update($syncTable, [
-                    'status' => 'failed', 'last_attempt' => QueryFunction::now(),
-                    'last_error' => $message, 'last_error_details' => null,
-                ], $where);
+                $results = $agent->syncBatch($requests);
             }
             catch (Throwable)
             {
-                // Database and HTTP exception messages can contain asset data or credentials.
-                $DB->update($syncTable, [
-                    'status' => 'failed',
-                    'last_attempt' => QueryFunction::now(),
-                    'last_error' => 'GLPI could not apply the asset changes.',
-                    'last_error_details' => null,
-                ], $where);
+                // A lost batch cannot acknowledge any individual result.
+                $results = [];
+            }
+            foreach ($steps as $id => $step)
+            {
+                try
+                {
+                    $plan = $step['plan'];
+                    $plan->send($results[$id] ?? null);
+                    if ($plan->valid())
+                    {
+                        continue;
+                    }
+                    self::finishEntry($plan->getReturn(), $step['where']);
+                }
+                catch (Throwable $error)
+                {
+                    self::failEntry($error, $step['where']);
+                }
+                unset($steps[$id]);
             }
         }
         return $attempted;
+    }
+
+    private static function loadQueuedAsset(array $entry, array $target): CommonDBTM
+    {
+        global $DB;
+
+        $type = $entry['asset_type'];
+        $asset = new $type();
+        if (!$asset->getFromDB($entry['assets_id'])
+            || (int) $asset->fields['entities_id'] !== (int) $target['route']['controller_entity_id']
+            || !empty($asset->fields['is_deleted']) || !empty($asset->fields['is_template'])
+            || trim((string) $asset->fields['serial']) !== $entry['serial'])
+        {
+            throw new SyncProblem('The asset or its serial number changed on GLPI A.');
+        }
+
+        // Multiple live A records with the same serial would target one B record.
+        $duplicates = $DB->request([
+            'SELECT' => ['id'],
+            'FROM' => $type::getTable(),
+            'WHERE' => $target['criteria'] + ['RAW' => ['TRIM(serial)' => $entry['serial']]],
+            'LIMIT' => 2,
+        ]);
+        if (count($duplicates) !== 1)
+        {
+            throw new SyncProblem('The serial number is ambiguous in the mapped GLPI A entity.');
+        }
+        return $asset;
+    }
+
+    private static function finishEntry(array $result, array $where): void
+    {
+        global $DB;
+
+        $status = [
+            'status' => 'finished',
+            'last_error' => null,
+            'last_error_details' => null,
+            'pending_fields' => null,
+            'field_snapshot' => json_encode($result['snapshot'], JSON_THROW_ON_ERROR),
+        ];
+        if ($result['direction'] !== null)
+        {
+            $status['sync_direction'] = $result['direction'];
+        }
+        $DB->update(PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE, $status, $where);
+    }
+
+    private static function failEntry(Throwable $error, array $where): int
+    {
+        global $DB;
+
+        // Database and HTTP exception messages can contain asset data or credentials.
+        $message = 'GLPI could not apply the asset changes.';
+        $details = null;
+        if ($error instanceof SyncProblem)
+        {
+            $message = $error->getMessage();
+            if ($error->details !== [])
+            {
+                $details = json_encode($error->details, JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR);
+            }
+        }
+        elseif ($error instanceof SyncException)
+        {
+            $message = match ($error->getMessage()) {
+                'field_unavailable', 'field_read_only' => 'GLPI A could not read or write a mapped field.',
+                'reference_unavailable', 'invalid_reference_value' => 'GLPI A could not resolve a mapped dropdown value in the route entity.',
+                'invalid_field_value' => 'A mapped value is incompatible with the destination field type.',
+                'notes_write_failed' => 'GLPI A did not retain a copied Notes record.',
+                default => 'GLPI A could not apply a mapped field value.',
+            };
+        }
+        $DB->update(PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE, [
+            'status' => 'failed',
+            'last_attempt' => QueryFunction::now(),
+            'last_error' => $message,
+            'last_error_details' => $details,
+        ], $where);
+        return $DB->affectedRows();
     }
 
     private static function openAgent(array $connection, array &$agents): ?AgentApi

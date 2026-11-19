@@ -157,6 +157,26 @@ if (!is_string($statusFilter) || !isset($syncStatuses[$statusFilter]))
 }
 
 $syncRows = [];
+$syncStatusCounts = array_fill_keys(array_keys($syncStatuses), 0);
+$syncAssetTotal = 0;
+$syncAssetsLeft = 0;
+if ($route !== null)
+{
+    // Summarize the whole selected route so table filters and pagination do not change progress.
+    foreach ($DB->request([
+        'SELECT' => ['status'],
+        'COUNT' => 'asset_count',
+        'FROM' => PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE,
+        'WHERE' => ['routes_id' => $routeId],
+        'GROUPBY' => ['status'],
+    ]) as $statusCount)
+    {
+        $count = (int) $statusCount['asset_count'];
+        $syncStatusCounts[$statusCount['status']] = $count;
+        $syncAssetTotal += $count;
+    }
+    $syncAssetsLeft = $syncAssetTotal - $syncStatusCounts['finished'];
+}
 $canCancelQueuedAssets = $route !== null && $canRetrySync;
 $assetTypes = $route === null ? [] : (json_decode($route['asset_types'], true) ?? []);
 $mappedAssetTypes = [];
@@ -222,7 +242,8 @@ if ($route !== null)
         'SELECT' => $syncColumns,
         'FROM' => PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE,
         'WHERE' => $criteria,
-        'ORDER' => ['date_mod DESC', 'asset_type', 'assets_id'],
+        // Sort before pagination so finished assets don't appear ahead of unfinished work on later pages.
+        'ORDER' => [new QueryExpression("CASE WHEN status = 'finished' THEN 1 ELSE 0 END"), 'date_mod DESC', 'asset_type', 'assets_id'],
         'START' => ($page - 1) * $pageSize,
         'LIMIT' => $pageSize + 1,
     ]), false);
