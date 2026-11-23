@@ -5,9 +5,11 @@ use GlpiPlugin\Assetsynccontroller\Access;
 use Glpi\DBAL\QueryExpression;
 use GlpiPlugin\Assetsynccontroller\ManualSync;
 use GlpiPlugin\Assetsynccontroller\Menu;
+use GlpiPlugin\Assetsynccontroller\SyncExport;
 use GlpiPlugin\Assetsynccontroller\SyncProblem;
 use GlpiPlugin\Assetsynccontroller\SyncRunner;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 global $CFG_GLPI, $DB;
 
@@ -57,6 +59,18 @@ if ($activeEntityIds !== [])
 $isPost = $_SERVER['REQUEST_METHOD'] === 'POST';
 $routeId = filter_var(($isPost ? $_POST : $_GET)['route_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
 $route = $routeId !== false ? ($routes[$routeId] ?? null) : null;
+$exportFormat = $_GET['sync_export'] ?? null;
+if ($exportFormat !== null)
+{
+    if ($_SERVER['REQUEST_METHOD'] !== 'GET' || !in_array($exportFormat, ['csv', 'xlsx'], true))
+    {
+        throw new BadRequestHttpException('Select CSV or XLSX to export sync information.');
+    }
+    if ($route === null)
+    {
+        throw new NotFoundHttpException('The route is unavailable in your current GLPI scope.');
+    }
+}
 if ($isPost)
 {
     // GLPI checks the form's CSRF token. The route lookup above also checks the current entity scope.
@@ -167,46 +181,8 @@ if (!is_string($statusFilter) || !isset($syncStatuses[$statusFilter]))
     $statusFilter = '';
 }
 
-$syncRows = [];
-$syncStatusCounts = array_fill_keys(array_keys($syncStatuses), 0);
-$syncAssetTotal = 0;
-$syncAssetsLeft = 0;
-if ($route !== null)
-{
-    // Summarize the whole selected route so table filters and pagination do not change progress.
-    foreach ($DB->request([
-        'SELECT' => ['status'],
-        'COUNT' => 'asset_count',
-        'FROM' => PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE,
-        'WHERE' => ['routes_id' => $routeId],
-        'GROUPBY' => ['status'],
-    ]) as $statusCount)
-    {
-        $count = (int) $statusCount['asset_count'];
-        $syncStatusCounts[$statusCount['status']] = $count;
-        $syncAssetTotal += $count;
-    }
-    $syncAssetsLeft = $syncAssetTotal - $syncStatusCounts['finished'];
-}
 $canCancelQueuedAssets = $route !== null && $canRetrySync;
 $assetTypes = $route === null ? [] : (json_decode($route['asset_types'], true) ?? []);
-$mappedAssetTypes = [];
-if ($route !== null && $canRetrySync)
-{
-    foreach ($DB->request([
-        'SELECT' => ['asset_type'],
-        'FROM' => PLUGIN_ASSETSYNCCONTROLLER_MAPPINGS_TABLE,
-        'WHERE' => ['routes_id' => $routeId],
-        'GROUPBY' => ['asset_type'],
-    ]) as $mapping)
-    {
-        $type = $mapping['asset_type'];
-        if (isset($assetTypes[$type]))
-        {
-            $mappedAssetTypes[$type] = $assetTypes[$type];
-        }
-    }
-}
 $assetTypeFilter = $_GET['sync_asset_type'] ?? '';
 if (!is_string($assetTypeFilter) || !isset($assetTypes[$assetTypeFilter]))
 {
@@ -215,6 +191,12 @@ if (!is_string($assetTypeFilter) || !isset($assetTypes[$assetTypeFilter]))
 
 $searchText = $_GET['sync_search'] ?? '';
 $searchText = is_string($searchText) ? mb_substr(trim($searchText), 0, 255) : '';
+
+$syncRows = [];
+$syncStatusCounts = array_fill_keys(array_keys($syncStatuses), 0);
+$syncAssetTotal = 0;
+$syncAssetsLeft = 0;
+$mappedAssetTypes = [];
 $previousPageUrl = null;
 $nextPageUrl = null;
 if ($route !== null)
@@ -238,23 +220,66 @@ if ($route !== null)
         ];
     }
 
+    $rowQuery = [
+        'SELECT' => ['id', 'asset_type', 'assets_id', 'serial', 'asset_name', 'status', 'last_error', 'sync_direction', 'date_mod'],
+        'FROM' => PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE,
+        'WHERE' => $criteria,
+        // Use the same order in the dashboard and in both export formats.
+        'ORDER' => [new QueryExpression("CASE WHEN status = 'finished' THEN 1 ELSE 0 END"), 'date_mod DESC', 'asset_type', 'assets_id'],
+    ];
+    if ($exportFormat !== null)
+    {
+        // Export the visible reason, without restricted details or pagination limits.
+        $syncExportResponse = SyncExport::response(
+            $exportFormat,
+            $DB->request($rowQuery),
+            $assetTypes,
+            $syncStatuses,
+            $syncDirections,
+        );
+        return;
+    }
+
+    // Summarize the whole selected route so table filters and pagination do not change progress.
+    foreach ($DB->request([
+        'SELECT' => ['status'],
+        'COUNT' => 'asset_count',
+        'FROM' => PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE,
+        'WHERE' => ['routes_id' => $routeId],
+        'GROUPBY' => ['status'],
+    ]) as $statusCount)
+    {
+        $count = (int) $statusCount['asset_count'];
+        $syncStatusCounts[$statusCount['status']] = $count;
+        $syncAssetTotal += $count;
+    }
+    $syncAssetsLeft = $syncAssetTotal - $syncStatusCounts['finished'];
+
+    // Failure details can contain a submitted asset value. Only users who can retry sync may see it.
+    if ($canRetrySync)
+    {
+        $rowQuery['SELECT'][] = 'last_error_details';
+        foreach ($DB->request([
+            'SELECT' => ['asset_type'],
+            'FROM' => PLUGIN_ASSETSYNCCONTROLLER_MAPPINGS_TABLE,
+            'WHERE' => ['routes_id' => $routeId],
+            'GROUPBY' => ['asset_type'],
+        ]) as $mapping)
+        {
+            $type = $mapping['asset_type'];
+            if (isset($assetTypes[$type]))
+            {
+                $mappedAssetTypes[$type] = $assetTypes[$type];
+            }
+        }
+    }
+
     // Limit the page size without hiding older records. The extra row tells us if there is a next page.
     $pageSize = 50;
     $page = filter_var($_GET['sync_page'] ?? 1, FILTER_VALIDATE_INT, [
         'options' => ['min_range' => 1, 'max_range' => intdiv(PHP_INT_MAX, $pageSize)],
     ]) ?: 1;
-    $syncColumns = ['id', 'asset_type', 'assets_id', 'serial', 'asset_name', 'status', 'last_error', 'sync_direction', 'date_mod'];
-    // Failure details can contain a submitted asset value. Only users who can retry sync may see it.
-    if ($canRetrySync)
-    {
-        $syncColumns[] = 'last_error_details';
-    }
-    $syncRows = iterator_to_array($DB->request([
-        'SELECT' => $syncColumns,
-        'FROM' => PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE,
-        'WHERE' => $criteria,
-        // Sort before pagination so finished assets don't appear ahead of unfinished work on later pages.
-        'ORDER' => [new QueryExpression("CASE WHEN status = 'finished' THEN 1 ELSE 0 END"), 'date_mod DESC', 'asset_type', 'assets_id'],
+    $syncRows = iterator_to_array($DB->request($rowQuery + [
         'START' => ($page - 1) * $pageSize,
         'LIMIT' => $pageSize + 1,
     ]), false);

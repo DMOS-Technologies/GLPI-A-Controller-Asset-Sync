@@ -43,6 +43,10 @@ elseif ($selectedSection === 'mappings')
 elseif ($selectedSection === 'sync-information')
 {
     require dirname(__DIR__) . '/inc/sync.php';
+    if (isset($syncExportResponse))
+    {
+        return $syncExportResponse;
+    }
 }
 elseif ($selectedSection === 'billing-configuration')
 {

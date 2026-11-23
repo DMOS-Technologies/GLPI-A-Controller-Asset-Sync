@@ -57,8 +57,19 @@
                     </div>
                 </div>
             </form>
-            <?php if ($mappedAssetTypes !== [] || $canCancelQueuedAssets): ?>
-                <div class="mt-3"><?php require __DIR__ . '/sync-actions.php'; ?></div>
+            <?php if ($route !== null): ?>
+                <div class="d-flex flex-wrap gap-2 mt-3">
+                    <?php if ($mappedAssetTypes !== [] || $canCancelQueuedAssets): ?>
+                        <?php require __DIR__ . '/sync-actions.php'; ?>
+                    <?php endif; ?>
+                    <?php // Use the applied filters without the current page number. ?>
+                    <a class="btn btn-outline-secondary" href="?<?= htmlescape(http_build_query($pageQuery + ['sync_export' => 'csv'])) ?>">
+                        Export to CSV
+                    </a>
+                    <a class="btn btn-outline-secondary" href="?<?= htmlescape(http_build_query($pageQuery + ['sync_export' => 'xlsx'])) ?>">
+                        Export to XLSX
+                    </a>
+                </div>
             <?php endif; ?>
         <?php endif; ?>
 
