@@ -72,14 +72,18 @@ class SyncPlan
         self::checkResponse($probe, $fieldsB + $flagFields);
         if (!is_bool($probe['exists'] ?? null))
         {
-            throw new SyncProblem('Agent B returned an invalid serial lookup result.');
+            throw new SyncProblem('Agent B returned an invalid serial lookup result.', details: [
+                'next_step' => 'Check the Agent B plugin version and its logs, then retry.',
+            ]);
         }
 
         $create = !$probe['exists'];
         $expectedAssetId = $probe['asset_id'] ?? null;
         if (!$create && (!is_int($expectedAssetId) || $expectedAssetId <= 0))
         {
-            throw new SyncProblem('Agent B returned an invalid asset ID for this serial.');
+            throw new SyncProblem('Agent B found the serial but returned an invalid asset ID.', details: [
+                'next_step' => 'Check that the serial identifies one accessible asset in the mapped GLPI B entity, then retry.',
+            ]);
         }
         if ($create && $mappings !== $routeMappings)
         {
@@ -106,7 +110,12 @@ class SyncPlan
             if (!array_key_exists('value', $valuesA[$idA] ?? [])
                 || (!$create && !array_key_exists('value', $valuesB[$idB] ?? [])))
             {
-                throw new SyncProblem('A mapped field is unavailable on one of the GLPI instances.');
+                $side = !array_key_exists('value', $valuesA[$idA] ?? []) ? 'a' : 'b';
+                throw new SyncProblem('One GLPI instance could not return a mapped field value.', details: [
+                    'side' => $side,
+                    'field' => self::fieldLabel($side === 'a' ? $fieldsA[$idA] : $fieldsB[$idB]),
+                    'next_step' => 'Reload the field list in Mappings and check the field and asset permissions on that instance.',
+                ]);
             }
 
             $a = $valuesA[$idA]['value'];
@@ -117,11 +126,18 @@ class SyncPlan
             {
                 if (!$notesA || !$notesB)
                 {
-                    throw new SyncProblem('Map Notes to Notes on both GLPI instances.');
+                    throw new SyncProblem('The Notes field is mapped to a different field type.', details: [
+                        'field_a' => self::fieldLabel($fieldsA[$idA]),
+                        'field_b' => self::fieldLabel($fieldsB[$idB]),
+                        'next_step' => 'Select Notes on both sides of the mapping, then retry.',
+                    ]);
                 }
                 if (!$create && ($valuesB[$idB]['kind'] ?? null) !== 'notes')
                 {
-                    throw new SyncProblem('Agent B did not return a Notes collection.');
+                    throw new SyncProblem('Agent B did not return a Notes collection.', details: [
+                        'field_b' => self::fieldLabel($fieldsB[$idB]),
+                        'next_step' => 'Check the Notes field mapping and the Agent B account permissions.',
+                    ]);
                 }
 
                 // Notes are separate records. Copy missing bodies in the selected direction and keep local notes.
@@ -138,7 +154,7 @@ class SyncPlan
                     }
                     else
                     {
-                        $direction = self::newerDirection($valuesA[$idA], $valuesB[$idB], $previous[$key] ?? null, 'merge_notes');
+                        $direction = self::newerDirection($valuesA[$idA], $valuesB[$idB], $previous[$key] ?? null, $fieldsA[$idA], $fieldsB[$idB], 'merge_notes');
                     }
                 }
 
@@ -178,7 +194,7 @@ class SyncPlan
             {
                 if ($direction === 'newer_edit')
                 {
-                    $direction = self::newerDirection($valuesA[$idA], $valuesB[$idB], $previous[$key] ?? null);
+                    $direction = self::newerDirection($valuesA[$idA], $valuesB[$idB], $previous[$key] ?? null, $fieldsA[$idA], $fieldsB[$idB]);
                 }
                 if ($direction === 'a_to_b')
                 {
@@ -202,7 +218,11 @@ class SyncPlan
                 }
                 elseif ($direction !== null)
                 {
-                    throw new SyncProblem('A field mapping has an invalid direction.');
+                    throw new SyncProblem('A field mapping has an invalid direction.', details: [
+                        'field_a' => self::fieldLabel($fieldsA[$idA]),
+                        'field_b' => self::fieldLabel($fieldsB[$idB]),
+                        'next_step' => 'Open Mappings, choose a valid sync direction for this field pair, and retry.',
+                    ]);
                 }
             }
             $snapshot[$key] = ['a' => self::fingerprint($a), 'b' => self::fingerprint($b)];
@@ -216,7 +236,10 @@ class SyncPlan
                 if (($current['kind'] ?? null) !== 'boolean' || !array_key_exists('value', $current)
                     || ($current['value'] !== null && !is_bool($current['value'])))
                 {
-                    throw new SyncProblem('Agent B did not return a valid Yes/No value for a configured flag.');
+                    throw new SyncProblem('Agent B did not return a valid Yes/No value for a configured flag.', details: [
+                        'field_b' => self::fieldLabel($field),
+                        'next_step' => 'Check that the selected flag is still an accessible Yes/No field on GLPI B.',
+                    ]);
                 }
                 if ($current['value'] === true)
                 {
@@ -270,7 +293,9 @@ class SyncPlan
             if (!is_int($result['asset_id'] ?? null) || $result['asset_id'] <= 0
                 || (!$create && $result['asset_id'] !== $expectedAssetId))
             {
-                throw new SyncProblem('Agent B did not acknowledge the asset write.');
+                throw new SyncProblem('Agent B did not confirm the write to the expected asset.', details: [
+                    'next_step' => 'Check the current asset record and sync logs on GLPI B, then retry.',
+                ]);
             }
 
             // B can store a full dropdown path after matching a shorter label. Use its actual stored value.
@@ -301,14 +326,19 @@ class SyncPlan
                         $expectedA = SyncFields::write($asset, array_values($writeA));
                         if (!$asset->getFromDB($entry['assets_id']))
                         {
-                            throw new SyncProblem('GLPI A could not reload the synchronized asset.');
+                            throw new SyncProblem('GLPI A could not reload the asset after the attempted write.', details: [
+                                'next_step' => 'Check that the asset still exists and is accessible in the mapped GLPI A entity.',
+                            ]);
                         }
                         $saved = SyncFields::read($asset, array_column($writeA, 'field'));
                         foreach ($expectedA as $id => $value)
                         {
                             if (!isset($saved[$id]) || self::fingerprint($saved[$id]['value']) !== self::fingerprint($value))
                             {
-                                throw new SyncProblem('GLPI A did not retain a mapped field value.');
+                                throw new SyncProblem('GLPI A did not retain a mapped field value.', details: [
+                                    'field_a' => self::fieldLabel($writeA[$id]['field']),
+                                    'next_step' => 'Check the field restrictions and asset rules on GLPI A before retrying.',
+                                ]);
                             }
                         }
                         return $saved;
@@ -374,7 +404,10 @@ class SyncPlan
             {
                 if (SyncFlags::sameField($field, $other))
                 {
-                    throw new SyncProblem('Each GLPI B flag must use its own field outside the ordinary mappings.');
+                    throw new SyncProblem('A GLPI B flag points to a field already used by another mapping or flag.', details: [
+                        'field_b' => self::fieldLabel($field),
+                        'next_step' => 'Choose a separate destination field for the flag in Mappings, then retry.',
+                    ]);
                 }
             }
             $fields[$field['id']] = $field;
@@ -398,14 +431,19 @@ class SyncPlan
             || !empty($asset->fields['is_deleted']) || !empty($asset->fields['is_template'])
             || trim((string) $asset->fields['serial']) !== $entry['serial'])
         {
-            throw new SyncProblem('The route, connection, or source asset changed during sync.');
+            throw new SyncProblem('The source asset changed or left the mapped GLPI A entity during sync.', details: [
+                'next_step' => 'Verify the asset still exists in the mapped entity with the expected serial number, then retry.',
+            ]);
         }
         $now = SyncFields::read($asset, array_values($fields));
         foreach ($before as $id => $field)
         {
             if (!isset($now[$id]) || self::fingerprint($now[$id]['value']) !== self::fingerprint($field['value']))
             {
-                throw new SyncProblem('A mapped field was edited on GLPI A during sync. It will be retried.');
+                throw new SyncProblem('A mapped field was edited on GLPI A during sync.', details: [
+                    'field_a' => self::fieldLabel($fields[$id]),
+                    'next_step' => 'Retry once edits to the asset are complete.',
+                ]);
             }
         }
     }
@@ -414,16 +452,27 @@ class SyncPlan
     {
         if (SyncRunner::getConnection($route) === null)
         {
-            throw new SyncProblem('The route or connection changed during sync.');
+            throw new SyncProblem('The route or connection changed during sync.', details: [
+                'next_step' => 'Check that the route and connection are enabled and that the route is verified before retrying.',
+            ]);
         }
         $routeId = (int) $route['id'];
         if ($mappings !== SyncRunner::getMappings($routeId, $assetType) || $flags !== SyncFlags::get($routeId, $assetType))
         {
-            throw new SyncProblem('The field mappings changed during sync.');
+            throw new SyncProblem('The field mappings or flags changed during sync.', details: [
+                'next_step' => 'Review the saved mappings and flags before retrying.',
+            ]);
         }
     }
 
-    private static function newerDirection(array $a, array $b, ?array $previous, ?string $onTie = null): ?string
+    private static function newerDirection(
+        array $a,
+        array $b,
+        ?array $previous,
+        array $fieldA,
+        array $fieldB,
+        ?string $onTie = null,
+    ): ?string
     {
         // A one-sided edit after the last acknowledgement is newer even without field history.
         if ($previous !== null)
@@ -454,7 +503,27 @@ class SyncPlan
                 // Notes can merge safely without deleting either version.
                 return $onTie;
             }
-            throw new SyncProblem('The newest edit could not be established for a bidirectional field.');
+            $sameTime = is_int($timeA) && is_int($timeB);
+            $missing = match (true) {
+                !is_int($timeA) && !is_int($timeB) => 'GLPI A and GLPI B',
+                !is_int($timeA) => 'GLPI A',
+                default => 'GLPI B',
+            };
+            // Do not guess which value should win when history cannot establish the order.
+            throw new SyncProblem(
+                $sameTime ? 'Two-way sync conflict. Both edits have the same recorded time.'
+                    : "Two-way sync conflict. A field edit time is missing on $missing.",
+                details: [
+                    'field_a' => self::fieldLabel($fieldA),
+                    'field_b' => self::fieldLabel($fieldB),
+                    'reason' => $sameTime
+                        ? 'The mapped values differ, but both fields have the same edit time in History. Newer Edit Wins cannot choose which value to keep.'
+                        : "The mapped values differ, but $missing has no usable timestamp for its field edit in History. Newer Edit Wins cannot choose which value to keep.",
+                    'next_step' => $sameTime
+                        ? 'Make a new edit on the side whose value should win and retry. To keep that side authoritative, set a one-way direction in Mappings.'
+                        : 'Choose the side whose value should win, set that one-way direction in Mappings, and retry.',
+                ],
+            );
         }
         return $timeA > $timeB ? 'a_to_b' : 'b_to_a';
     }
@@ -487,7 +556,10 @@ class SyncPlan
         $id = $field['id'];
         if (isset($writes[$id]) && self::fingerprint($writes[$id]['value']) !== self::fingerprint($value))
         {
-            throw new SyncProblem('Multiple mappings give different values to the same field.');
+            throw new SyncProblem('Multiple mappings give different values to the same destination field.', details: [
+                'field' => self::fieldLabel($field),
+                'next_step' => 'Review the mappings for this field and keep a single source before retrying.',
+            ]);
         }
         $writes[$id] = ['field' => $field, 'value' => $value];
     }
@@ -500,12 +572,19 @@ class SyncPlan
         }
         catch (SyncException $problem)
         {
+            $destination = $side === 'a' ? 'GLPI A' : 'GLPI B';
+            $nextStep = 'Check the mapped source value and the expected field type on the destination.';
             if (in_array($kind, ['dropdown', 'dropdown_list'], true))
             {
-                $destination = $side === 'a' ? 'GLPI A' : 'Agent B';
-                throw SyncProblem::dropdown("$destination could not convert the attempted dropdown value.", $side, $field, $value);
+                $message = "$destination could not convert the attempted dropdown value.";
+                $details = SyncProblem::dropdown($message, $side, $field, $value)->details;
+                throw new SyncProblem($message, details: $details + ['next_step' => $nextStep]);
             }
-            throw $problem;
+            throw new SyncProblem("$destination cannot use this value for the mapped field type.", details: [
+                'field' => self::fieldLabel($field),
+                'side' => $side,
+                'next_step' => $nextStep,
+            ]);
         }
     }
 
@@ -516,16 +595,28 @@ class SyncPlan
             return;
         }
         $error = $result['error'] ?? null;
-        $message = match ($error) {
-            'ambiguous_serial' => 'The serial number matches more than one asset in the mapped GLPI B entity.',
-            'field_unavailable', 'field_read_only' => 'Agent B could not read or write a mapped field.',
-            'reference_unavailable' => 'Agent B could not resolve a mapped dropdown value in the destination entity.',
-            'invalid_field_value', 'invalid_reference_value' => 'Agent B rejected a value for the destination field type.',
-            'asset_changed', 'asset_identity_changed', 'asset_busy' => 'The asset changed or is busy on Agent B. It will be retried.',
-            'entity_not_allowed' => 'The Agent B account cannot access the mapped GLPI B entity.',
-            'batch_payload_too_large' => 'The mapped data for this asset exceeds the Agent B batch request limit.',
-            default => 'Agent B did not acknowledge this sync request.',
+        [$message, $nextStep] = match ($error) {
+            'ambiguous_serial' => ['Multiple assets on GLPI B have this serial number in the mapped entity.', 'Find the duplicate serials for this asset type in the destination entity and correct them before retrying.'],
+            'asset_access_denied' => ['The Agent B account is missing permission to read, create, or edit the asset.', 'Check the account profile and its asset permissions for the mapped GLPI B entity.'],
+            'asset_busy' => ['Another request is processing this asset on GLPI B.', 'Wait for that request to finish, then retry.'],
+            'asset_changed' => ['The asset changed on GLPI B during sync.', 'Check the latest values on both sides and retry once the asset is no longer being edited.'],
+            'asset_identity_changed' => ['The asset on GLPI B no longer matches the serial number, entity, or record found at lookup.', 'Check the asset serial number and mapped entity on GLPI B, then retry.'],
+            'asset_type_unavailable' => ['The mapped asset type is unavailable to Agent B.', 'Check that the asset type exists and the Agent B account has access to it. Reload the route and its mappings if the asset type changed.'],
+            'authentication_failed', 'authentication_required' => ['Agent B could not authenticate the sync request.', 'Verify the Agent B URL and saved application and user tokens in Connections.'],
+            'entity_not_allowed' => ['The Agent B account cannot access the mapped GLPI B entity.', 'Check the destination entity in Routes and grant the Agent B account access to it.'],
+            'field_read_only' => ['A mapped field on GLPI B is read-only for the Agent B account.', 'Check the field settings and account permissions, or select a writable destination in Mappings.'],
+            'field_unavailable' => ['Agent B cannot find or read a mapped field.', 'Reload the available fields in Mappings and check that the field still exists and is visible to the Agent B account.'],
+            'field_write_failed' => ['GLPI B could not save a mapped field.', 'Check the destination field settings, including any required fields. If retry still fails, check the GLPI B logs.'],
+            'invalid_field_value' => ['GLPI B rejected a value for a mapped field.', 'Check the required format and allowed values for the destination field.'],
+            'invalid_reference_value' => ['GLPI B rejected the format of a mapped reference value.', 'Check whether the destination expects a single dropdown option, multiple options, or a linked record.'],
+            'reference_unavailable' => ['GLPI B could not find a unique match for a mapped dropdown option or linked record.', 'Check that the matching option or record exists and is visible in the destination entity. Resolve any duplicate matches before retrying.'],
+            'unmapped_field_changed' => ['A GLPI B rule or plugin changed a field outside this mapping. The write was rolled back.', 'Review the asset rules or plugin settings on GLPI B before retrying.'],
+            'batch_payload_too_large', 'request_too_large' => ['The mapped data exceeds the Agent B request limit.', 'Check for unusually large mapped values, such as long notes, and reduce the data included in the sync.'],
+            'invalid_request', 'method_not_allowed', 'unsupported_media_type' => ['Agent B rejected the sync request format.', 'Verify that both plugins are on compatible versions and that the connection points to the correct GLPI B URL.'],
+            'internal_error' => ['Agent B encountered an internal error while processing the asset.', 'Check the GLPI B server logs around the failure time before retrying.'],
+            default => ['Agent B did not return a usable response for this asset.', 'Check the connection and Agent B availability. If it keeps failing, check the GLPI B logs and plugin versions.'],
         };
+        $details = ['next_step' => $nextStep];
         // The Agent identifies a failed option. Its name and planned value come from this request.
         $fieldId = $result['field_id'] ?? null;
         if (is_int($fieldId) && in_array($error, ['reference_unavailable', 'invalid_reference_value', 'invalid_field_value'], true))
@@ -534,10 +625,15 @@ class SyncPlan
             $field = $write['field'] ?? $fields[$fieldId] ?? null;
             if ($field !== null)
             {
-                throw SyncProblem::dropdown($message, 'b', $field, $write['value'] ?? null);
+                $details += SyncProblem::dropdown($message, 'b', $field, $write['value'] ?? null)->details;
             }
         }
-        throw new SyncProblem($message);
+        throw new SyncProblem($message, details: $details);
+    }
+
+    private static function fieldLabel(array $field): string
+    {
+        return mb_substr((string) ($field['name'] ?? $field['field'] ?? 'Unknown field'), 0, 500);
     }
 
     private static function fingerprint(mixed $value): string

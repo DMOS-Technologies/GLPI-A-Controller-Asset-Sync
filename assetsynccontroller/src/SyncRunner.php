@@ -101,7 +101,7 @@ class SyncRunner
         // GLPI's task lock prevents overlap. Any Processing row left here lost its previous run.
         $DB->update($syncTable, [
             'status' => 'failed',
-            'last_error' => 'The previous sync run ended before Agent B acknowledged the result.',
+            'last_error' => 'The previous sync run stopped before Controller A could confirm the result. Check the Agent B connection, then retry this asset to verify its current state.',
             'last_error_details' => null,
         ], ['status' => 'processing']);
         $targets = self::discover();
@@ -248,13 +248,13 @@ class SyncRunner
                 $connection = self::getConnection($route);
                 if ($connection === null)
                 {
-                    throw new SyncProblem('The route or connection is disabled or its settings changed.');
+                    throw new SyncProblem('The route or its connection changed before this asset could sync. Check that both are enabled and reverify the route after changing the connection.');
                 }
                 $asset = self::loadQueuedAsset($entry, $target);
                 $agent ??= self::openAgent($connection, $agents);
                 if ($agent === null)
                 {
-                    throw new SyncProblem('Could not authenticate to Agent B.');
+                    throw new SyncProblem('Controller A could not start an authenticated session with Agent B. Use Test Connection to check the saved URL and API tokens.');
                 }
                 $flags = SyncFlags::get((int) $route['id'], $entry['asset_type']);
                 $plan = SyncPlan::steps($asset, $route, $target['mappings'], $entry, $flags);
@@ -307,7 +307,20 @@ class SyncRunner
                 try
                 {
                     $plan = $step['plan'];
-                    $plan->send($results[$id] ?? null);
+                    $response = $results[$id] ?? null;
+                    if ($response === null)
+                    {
+                        // Missing acknowledgements are ambiguous on a write. Retrying looks up the asset again.
+                        $isWrite = $plan->current()['operation'] === 'apply';
+                        $message = $isWrite
+                            ? 'Controller A did not receive a valid write acknowledgement from Agent B. The write may have completed.'
+                            : 'Controller A did not receive a valid lookup response from Agent B for this asset.';
+                        throw new SyncProblem($message, details: [
+                            'side' => 'b',
+                            'next_step' => 'Check Test Connection, the Agent B plugin version, and GLPI B logs. Then retry this asset.',
+                        ]);
+                    }
+                    $plan->send($response);
                     if ($plan->valid())
                     {
                         continue;
@@ -330,12 +343,18 @@ class SyncRunner
 
         $type = $entry['asset_type'];
         $asset = new $type();
-        if (!$asset->getFromDB($entry['assets_id'])
-            || (int) $asset->fields['entities_id'] !== (int) $target['route']['controller_entity_id']
-            || !empty($asset->fields['is_deleted']) || !empty($asset->fields['is_template'])
-            || trim((string) $asset->fields['serial']) !== $entry['serial'])
+        if (!$asset->getFromDB($entry['assets_id']))
         {
-            throw new SyncProblem('The asset or its serial number changed on GLPI A.');
+            throw new SyncProblem('The queued asset no longer exists in GLPI A. If it was recreated, queue the new asset from its current route.');
+        }
+        if ((int) $asset->fields['entities_id'] !== (int) $target['route']['controller_entity_id']
+            || !empty($asset->fields['is_deleted']) || !empty($asset->fields['is_template']))
+        {
+            throw new SyncProblem('The queued asset is outside the mapped entity, in the trash, or a template in GLPI A. Restore it or use a route for its current entity.');
+        }
+        if (trim((string) $asset->fields['serial']) !== $entry['serial'])
+        {
+            throw new SyncProblem('The asset serial number in GLPI A changed after it was queued. Confirm the serial number, then queue the current asset again.');
         }
 
         // Multiple live A records with the same serial would target one B record.
@@ -347,7 +366,7 @@ class SyncRunner
         ]);
         if (count($duplicates) !== 1)
         {
-            throw new SyncProblem('The serial number is ambiguous in the mapped GLPI A entity.');
+            throw new SyncProblem('Controller A could not find exactly one active asset of this type with the queued serial number in the mapped entity. Check for duplicate serial numbers or a recently moved asset.');
         }
         return $asset;
     }
@@ -375,31 +394,33 @@ class SyncRunner
         global $DB;
 
         // Database and HTTP exception messages can contain asset data or credentials.
-        $message = 'GLPI could not apply the asset changes.';
-        $details = null;
+        $message = 'An unexpected Controller A error interrupted this asset sync. Check GLPI A’s PHP and automatic-action logs before retrying.';
+        $details = [];
         if ($error instanceof SyncProblem)
         {
             $message = $error->getMessage();
-            if ($error->details !== [])
-            {
-                $details = json_encode($error->details, JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR);
-            }
+            $details = $error->details;
         }
         elseif ($error instanceof SyncException)
         {
             $message = match ($error->getMessage()) {
-                'field_unavailable', 'field_read_only' => 'GLPI A could not read or write a mapped field.',
-                'reference_unavailable', 'invalid_reference_value' => 'GLPI A could not resolve a mapped dropdown value in the route entity.',
-                'invalid_field_value' => 'A mapped value is incompatible with the destination field type.',
-                'notes_write_failed' => 'GLPI A did not retain a copied Notes record.',
-                default => 'GLPI A could not apply a mapped field value.',
+                'invalid_field', 'field_unavailable' => 'A mapped field is unavailable in GLPI A. Reload the route’s field list and check that the field still exists and is visible to the sync account.',
+                'field_read_only' => 'A mapped field is read-only in GLPI A. Check its edit permissions and the GLPI A write account in Connections, or change the mapping direction.',
+                'reference_unavailable' => 'GLPI A could not resolve a mapped dropdown or item reference. Verify the value exists and is unique and visible in the mapped entity.',
+                'invalid_reference_value' => 'GLPI A received an invalid dropdown or item reference. Check that the mapped fields accept the same kind of value.',
+                'invalid_field_value' => 'A mapped value does not match the field type or format required by GLPI A. Compare the mapping’s field types and the source value.',
+                'notes_write_failed' => 'GLPI A could not retain the copied Notes record. Check the write account’s Notes permissions for this asset and review the GLPI A logs.',
+                'custom_field_write_failed' => 'GLPI A rejected an update to a custom field. Check required fields, allowed values, and edit permissions on the Fields container.',
+                'asset_update_failed' => 'GLPI A could not save or reload the asset after updating it. Check whether the asset still exists and review its field validation and the GLPI A logs.',
+                'asset_history_failed' => 'GLPI A could not save the sync history entry. Check the GLPI A database and PHP logs, then retry.',
+                default => 'GLPI A rejected a mapped update. Check the asset’s mappings and review GLPI A’s PHP and automatic-action logs before retrying.',
             };
         }
         $DB->update(PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE, [
             'status' => 'failed',
             'last_attempt' => QueryFunction::now(),
             'last_error' => $message,
-            'last_error_details' => $details,
+            'last_error_details' => $details === [] ? null : json_encode($details, JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR),
         ], $where);
         return $DB->affectedRows();
     }
@@ -472,15 +493,15 @@ class SyncRunner
             $blocked = null;
             if (!$route['is_enabled'])
             {
-                $blocked = 'The route is disabled.';
+                $blocked = 'This route is disabled. Enable it in Routes to sync eligible assets.';
             }
             elseif (!$route['connection_enabled'] || (int) $route['connection_revision'] !== (int) $route['current_revision'])
             {
-                $blocked = 'The connection is disabled or the route is Pending.';
+                $blocked = 'The connection is disabled or the route needs verification. Check Connections and reverify the route.';
             }
             elseif ($mappings === [])
             {
-                $blocked = 'No fields are mapped for this asset type.';
+                $blocked = 'No fields are mapped for this asset type. Add field mappings for this route and asset type.';
             }
 
             self::refreshInventory($route, $type, $criteria, $blocked);
@@ -544,7 +565,7 @@ class SyncRunner
             unset($previous[$assetId]);
             $serial = trim((string) $asset['serial']);
             $state = ['serial' => $serial, 'asset_name' => (string) $asset['name']];
-            $error = $serial === '' ? 'The asset has no serial number.' : $blocked;
+            $error = $serial === '' ? 'Enter a serial number in GLPI A so the sync can identify this asset on GLPI B.' : $blocked;
 
             if ($entry === null)
             {

@@ -100,7 +100,9 @@ $formUrl = $listUrl . ($editingRoute === null ? '&amp;route_action=add' : '&amp;
 
             <?php if (count($savedConnections) === 0): ?>
                 <p>Add a connection before saving a route.</p>
-                <a href="?section=connections" class="btn btn-primary">Go to Connections</a>
+                <?php if (isset($sections['connections'])): ?>
+                    <a href="?section=connections" class="btn btn-primary">Go to Connections</a>
+                <?php endif; ?>
                 <a href="<?= $listUrl ?>" class="btn btn-outline-secondary">Cancel</a>
             <?php elseif ($controllerEntities === []): ?>
                 <p>No Controller A entities are available in your current GLPI scope.</p>

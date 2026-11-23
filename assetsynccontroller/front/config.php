@@ -1,10 +1,9 @@
 <?php
 
+use GlpiPlugin\Assetsynccontroller\Access;
 use GlpiPlugin\Assetsynccontroller\Menu;
+use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
-
-// Check permission for direct visits as well as visits from the Setup menu.
-Session::checkRight(Config::$rightname, READ);
 
 // A saved link may still be visited when GLPI has not loaded the plugin.
 $pluginIsLoaded = defined('PLUGIN_ASSETSYNCCONTROLLER_NAME');
@@ -13,21 +12,20 @@ if (!$pluginIsLoaded || !Plugin::isPluginActive('assetsynccontroller'))
     throw new NotFoundHttpException();
 }
 
-// Each section has a stable URL key and a label displayed in the menu.
-$sections = [
-    'connections' => 'Connections',
-    'routes' => 'Routes',
-    'mappings' => 'Mappings',
-    'sync-information' => 'Sync Information',
-    'billing-configuration' => 'Billing Configuration',
-];
-
-// Open Connections by default, including when a link has an invalid section.
-$selectedSection = $_GET['section'] ?? 'connections';
-if (!is_string($selectedSection) || !isset($sections[$selectedSection]))
+// Load any profile changes before choosing the first accessible Setup section.
+Session::checkCentralAccess();
+$sections = Access::visibleSections();
+$selectedSection = $_GET['section'] ?? array_key_first($sections);
+if ($selectedSection === null)
 {
-    $selectedSection = 'connections';
+    throw new AccessDeniedHttpException('Your profile has no access to Asset Sync Controller.');
 }
+if (!is_string($selectedSection) || !isset(Access::SECTIONS[$selectedSection]))
+{
+    throw new NotFoundHttpException('Asset Sync Controller section not found.');
+}
+// Check explicit links as well as visible tabs.
+Access::checkRead($selectedSection);
 
 if ($selectedSection === 'connections')
 {

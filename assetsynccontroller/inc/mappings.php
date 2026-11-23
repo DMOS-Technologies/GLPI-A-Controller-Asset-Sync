@@ -1,5 +1,7 @@
 <?php
 
+use GlpiPlugin\Assetsynccontroller\Access;
+
 use Glpi\Search\SearchOption;
 use GlpiPlugin\Assetsynccontroller\AgentApi;
 use GlpiPlugin\Assetsynccontroller\MappingFields;
@@ -17,7 +19,7 @@ $routesTable = PLUGIN_ASSETSYNCCONTROLLER_ROUTES_TABLE;
 $connectionsTable = PLUGIN_ASSETSYNCCONTROLLER_CONNECTIONS_TABLE;
 $mappingsTable = PLUGIN_ASSETSYNCCONTROLLER_MAPPINGS_TABLE;
 $entityTable = Entity::getTable();
-$canManageMappings = Session::haveRight(Config::$rightname, UPDATE);
+$canManageMappings = Access::canUpdate('mappings');
 $directions = [
     'a_to_b' => 'A → B',
     'b_to_a' => 'B → A',
@@ -31,7 +33,7 @@ $action = $isPost ? ($input['mapping_action'] ?? '') : '';
 if ($isPost)
 {
     // GLPI verifies CSRF before this handler runs.
-    Session::checkRight(Config::$rightname, UPDATE);
+    Access::checkUpdate('mappings');
     if (!in_array($action, ['load', 'save', 'remove', 'save_flags', 'clear_flags'], true))
     {
         throw new BadRequestHttpException('Unknown mapping action.');

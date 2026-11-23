@@ -2,7 +2,9 @@
     <div class="card-body">
         <?php if ($routes === []): ?>
             <p>No saved routes are available in your current GLPI scope.</p>
-            <a class="btn btn-primary" href="?section=routes">Go to Routes</a>
+            <?php if (isset($sections['routes'])): ?>
+                <a class="btn btn-primary" href="?section=routes">Go to Routes</a>
+            <?php endif; ?>
         <?php else: ?>
             <form method="get">
                 <input type="hidden" name="section" value="sync-information">
@@ -117,35 +119,33 @@
                                     // Older failed rows have only a summary and can still be inspected.
                                     $failure = json_decode($row['last_error_details'] ?? '', true);
                                     $failure = is_array($failure) ? $failure : [];
-                                    $field = $failure['field'] ?? null;
-                                    $value = $failure['value'] ?? null;
-                                    $reason = $failure['reason'] ?? null;
                                     $side = match ($failure['side'] ?? null) {
                                         'a', 'A', 'glpi_a', 'GLPI A' => 'GLPI A',
                                         'b', 'B', 'glpi_b', 'GLPI B' => 'GLPI B',
                                         default => null,
                                     };
+                                    $value = $failure['value'] ?? null;
+                                    $detailRows = array_filter([
+                                        'Destination' => $side,
+                                        'Field' => $failure['field'] ?? null,
+                                        'GLPI A field' => $failure['field_a'] ?? null,
+                                        'GLPI B field' => $failure['field_b'] ?? null,
+                                        'Attempted value' => $value === '' ? '(empty)' : $value,
+                                        'Reason' => $failure['reason'] ?? null,
+                                        'What to do next' => $failure['next_step']
+                                            ?? \GlpiPlugin\Assetsynccontroller\SyncProblem::storedGuidance($row['last_error'] ?? ''),
+                                    ], static fn($detail): bool => is_string($detail) && $detail !== '');
                                     ?>
                                     <details class="mt-2">
                                         <summary class="btn btn-sm btn-outline-secondary d-inline-flex">See Details</summary>
                                         <div class="border rounded p-2 mt-2">
                                             <p class="mb-2"><?= htmlescape($row['last_error'] ?: 'No error message was recorded.') ?></p>
-                                            <?php if (is_string($field) && $field !== ''): ?>
+                                            <?php if ($detailRows !== []): ?>
                                                 <dl class="mb-0">
-                                                    <?php if ($side !== null): ?>
-                                                        <dt>Destination</dt>
-                                                        <dd><?= htmlescape($side) ?></dd>
-                                                    <?php endif; ?>
-                                                    <dt>Field</dt>
-                                                    <dd class="text-break"><?= htmlescape($field) ?></dd>
-                                                    <?php if (is_string($value)): ?>
-                                                        <dt>Attempted value</dt>
-                                                        <dd class="text-break"><?= htmlescape($value === '' ? '(empty)' : $value) ?></dd>
-                                                    <?php endif; ?>
-                                                    <?php if (is_string($reason) && $reason !== ''): ?>
-                                                        <dt>Reason</dt>
-                                                        <dd class="text-break"><?= htmlescape($reason) ?></dd>
-                                                    <?php endif; ?>
+                                                    <?php foreach ($detailRows as $label => $detail): ?>
+                                                        <dt><?= htmlescape($label) ?></dt>
+                                                        <dd class="text-break"><?= htmlescape($detail) ?></dd>
+                                                    <?php endforeach; ?>
                                                 </dl>
                                             <?php endif; ?>
                                         </div>

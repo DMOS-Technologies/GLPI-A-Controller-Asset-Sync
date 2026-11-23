@@ -52,6 +52,15 @@ $syncActions = $mappedAssetTypes === [] ? [] : [
                         <button type="submit" class="btn btn-primary"><?= htmlescape($action['title']) ?></button>
                     </form>
                 <?php endforeach; ?>
+                <form method="post" action="<?= htmlescape($syncUrl) ?>" class="border-top pt-3 mb-3"
+                      aria-labelledby="asc-sync-retry-failed-title">
+                    <input type="hidden" name="_glpi_csrf_token" value="<?= htmlescape($retryToken) ?>">
+                    <input type="hidden" name="sync_action" value="retry_failed">
+                    <input type="hidden" name="route_id" value="<?= $routeId ?>">
+                    <h3 id="asc-sync-retry-failed-title">Sync Failed Assets</h3>
+                    <p class="text-secondary">Queue the assets marked Failed Syncing on this route for the next scheduled sync.</p>
+                    <button type="submit" class="btn btn-primary">Sync Failed Assets</button>
+                </form>
                 <?php if ($canCancelQueuedAssets): ?>
                     <form method="post" action="<?= htmlescape($syncUrl) ?>" class="border-top pt-3"
                           aria-labelledby="asc-sync-cancel-title">

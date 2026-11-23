@@ -118,6 +118,11 @@ class AgentApi
         // A missing or invalid acknowledgement fails only the corresponding queue entry.
         $results = array_fill_keys(array_column($requests, 'c_id'), null);
         $response = $this->syncAsset(['operation' => 'batch', 'requests' => $requests], self::MAX_BATCH_BYTES, 50);
+        if (($response['ok'] ?? null) === false && is_string($response['error'] ?? null))
+        {
+            // A batch-level rejection (for example, an expired session) applies to every submitted item.
+            return array_fill_keys(array_keys($results), ['ok' => false, 'error' => $response['error']]);
+        }
         if (($response['ok'] ?? false) !== true || !is_array($response['results'] ?? null)
             || !array_is_list($response['results']))
         {

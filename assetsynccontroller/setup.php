@@ -2,6 +2,7 @@
 
 use Glpi\Plugin\Hooks;
 use GlpiPlugin\Assetsynccontroller\Menu;
+use GlpiPlugin\Assetsynccontroller\Profile as ControllerProfile;
 
 const PLUGIN_ASSETSYNCCONTROLLER_NAME = 'Asset Sync Controller';
 const PLUGIN_ASSETSYNCCONTROLLER_CONNECTIONS_TABLE = 'glpi_plugin_assetsynccontroller_connections';
@@ -16,6 +17,8 @@ function plugin_init_assetsynccontroller(): void
 
     $PLUGIN_HOOKS[Hooks::CSRF_COMPLIANT]['assetsynccontroller'] = true;
     $PLUGIN_HOOKS[Hooks::ADD_JAVASCRIPT]['assetsynccontroller'] = ['js/history-field.js'];
+    $PLUGIN_HOOKS[Hooks::REDEFINE_MENUS]['assetsynccontroller'] = [Menu::class, 'refreshMenu'];
+    Plugin::registerClass(ControllerProfile::class, ['addtabon' => [Profile::class]]);
 
     // Include both tokens when GLPI rotates its encryption key.
     $PLUGIN_HOOKS[Hooks::SECURED_FIELDS]['assetsynccontroller'] = [
@@ -34,7 +37,7 @@ function plugin_version_assetsynccontroller(): array
 {
     return [
         'name' => PLUGIN_ASSETSYNCCONTROLLER_NAME,
-        'version' => '0.18.0',
+        'version' => '0.20.0',
         'requirements' => [
             'glpi' => [
                 'min' => '11.0.0',

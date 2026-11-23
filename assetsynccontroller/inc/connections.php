@@ -1,5 +1,7 @@
 <?php
 
+use GlpiPlugin\Assetsynccontroller\Access;
+
 use Glpi\DBAL\QueryExpression;
 use Glpi\DBAL\QueryFunction;
 use GlpiPlugin\Assetsynccontroller\AgentApi;
@@ -12,7 +14,7 @@ global $CFG_GLPI, $DB;
 
 $connectionsUrl = $CFG_GLPI['root_doc'] . Menu::PAGE_PATH . '?section=connections';
 $connectionsTable = PLUGIN_ASSETSYNCCONTROLLER_CONNECTIONS_TABLE;
-$canManageConnections = Session::haveRight(Config::$rightname, UPDATE);
+$canManageConnections = Access::canUpdate('connections');
 $isPost = $_SERVER['REQUEST_METHOD'] === 'POST';
 $action = $isPost ? ($_POST['connection_action'] ?? '') : ($_GET['connection_action'] ?? '');
 $connection = ['id' => 0, 'name' => '', 'api_url' => ''];
@@ -20,7 +22,7 @@ $error = '';
 
 if ($isPost || $action !== '')
 {
-    Session::checkRight(Config::$rightname, UPDATE);
+    Access::checkUpdate('connections');
 
     $allowedActions = $isPost ? ['add', 'edit', 'delete', 'enable', 'disable', 'test', 'save_local_write_user'] : ['add', 'edit', 'delete'];
     if (!in_array($action, $allowedActions, true))

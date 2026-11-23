@@ -1,5 +1,7 @@
 <?php
 
+use GlpiPlugin\Assetsynccontroller\Access;
+
 use GlpiPlugin\Assetsynccontroller\BillingConfiguration;
 use GlpiPlugin\Assetsynccontroller\BillingFields;
 use GlpiPlugin\Assetsynccontroller\BillingModels;
@@ -57,7 +59,7 @@ if ($hasFullBillingScope && $outsideScope !== [])
 {
     $billing['entities'] = array_values(array_intersect($billing['entities'], array_keys($entityOptions)));
 }
-$canSaveBilling = $hasFullBillingScope && Session::haveRight(Config::$rightname, UPDATE);
+$canSaveBilling = $hasFullBillingScope && Access::canUpdate('billing-configuration');
 $assetTypes = BillingFields::assetTypes();
 
 $isPost = $_SERVER['REQUEST_METHOD'] === 'POST';
@@ -99,7 +101,7 @@ if ($hasFullBillingScope && $billing['entities'] !== [])
 
 if ($isPost)
 {
-    Session::checkRight(Config::$rightname, UPDATE);
+    Access::checkUpdate('billing-configuration');
     $action = $_POST['billing_action'] ?? '';
     if (!in_array($action, ['entities', 'fields', 'swsd_fields', 'models'], true))
     {

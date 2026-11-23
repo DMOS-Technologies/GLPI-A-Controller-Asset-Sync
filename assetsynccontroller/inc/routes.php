@@ -1,5 +1,7 @@
 <?php
 
+use GlpiPlugin\Assetsynccontroller\Access;
+
 use GlpiPlugin\Assetsynccontroller\AgentApi;
 use GlpiPlugin\Assetsynccontroller\Menu;
 use GlpiPlugin\Assetsynccontroller\RouteSettings;
@@ -12,13 +14,13 @@ global $CFG_GLPI, $DB;
 $routesUrl = $CFG_GLPI['root_doc'] . Menu::PAGE_PATH . '?section=routes';
 $routesTable = PLUGIN_ASSETSYNCCONTROLLER_ROUTES_TABLE;
 $connectionsTable = PLUGIN_ASSETSYNCCONTROLLER_CONNECTIONS_TABLE;
-$canManageRoutes = Session::haveRight(Config::$rightname, UPDATE);
+$canManageRoutes = Access::canUpdate('routes');
 $isPost = $_SERVER['REQUEST_METHOD'] === 'POST';
 $input = $isPost ? $_POST : $_GET;
 $action = $input['route_action'] ?? '';
 if ($isPost || $action !== '')
 {
-    Session::checkRight(Config::$rightname, UPDATE);
+    Access::checkUpdate('routes');
     $allowedActions = $isPost ? ['load', 'save', 'delete'] : ['add', 'edit', 'delete'];
     if (!in_array($action, $allowedActions, true))
     {

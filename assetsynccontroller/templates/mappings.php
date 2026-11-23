@@ -13,7 +13,9 @@ $pageUrl = htmlescape($mappingsUrl);
 
         <?php if ($availableRoutes === []): ?>
             <p>No saved routes are available in your current GLPI scope.</p>
-            <a class="btn btn-primary" href="?section=routes">Go to Routes</a>
+            <?php if (isset($sections['routes'])): ?>
+                <a class="btn btn-primary" href="?section=routes">Go to Routes</a>
+            <?php endif; ?>
         <?php else: ?>
             <form method="get" class="mb-3">
                 <input type="hidden" name="section" value="mappings">

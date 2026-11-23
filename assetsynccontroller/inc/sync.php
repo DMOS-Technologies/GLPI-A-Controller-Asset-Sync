@@ -1,5 +1,7 @@
 <?php
 
+use GlpiPlugin\Assetsynccontroller\Access;
+
 use Glpi\DBAL\QueryExpression;
 use GlpiPlugin\Assetsynccontroller\ManualSync;
 use GlpiPlugin\Assetsynccontroller\Menu;
@@ -10,7 +12,7 @@ use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 global $CFG_GLPI, $DB;
 
 $syncUrl = $CFG_GLPI['root_doc'] . Menu::PAGE_PATH . '?section=sync-information';
-$canRetrySync = Session::haveRight(Config::$rightname, UPDATE);
+$canRetrySync = Access::canUpdate('sync-information');
 
 $syncStatuses = [
     'pending' => ['label' => 'Pending', 'badge' => 'bg-secondary-lt'],
@@ -58,7 +60,7 @@ $route = $routeId !== false ? ($routes[$routeId] ?? null) : null;
 if ($isPost)
 {
     // GLPI checks the form's CSRF token. The route lookup above also checks the current entity scope.
-    Session::checkRight(Config::$rightname, UPDATE);
+    Access::checkUpdate('sync-information');
     $action = $_POST['sync_action'] ?? null;
     if ($route !== null && $action === 'cancel')
     {
@@ -133,21 +135,30 @@ if ($isPost)
     }
 
     $syncId = filter_var($_POST['sync_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
-    if ($action !== 'retry' || $route === null || $syncId === false)
+    if ($route === null || !in_array($action, ['retry', 'retry_failed'], true) || ($action === 'retry' && $syncId === false))
     {
         throw new BadRequestHttpException('Invalid retry request.');
     }
 
+    // Keep the failed attempt's pending field selection and only requeue rows still failed.
+    $retryCriteria = ['routes_id' => $routeId, 'status' => 'failed'];
+    if ($action === 'retry')
+    {
+        $retryCriteria['id'] = $syncId;
+    }
     $DB->update(PLUGIN_ASSETSYNCCONTROLLER_SYNC_TABLE, [
         'status' => 'queued',
         'last_error' => null,
         'last_error_details' => null,
         'last_attempt' => null,
-    ], ['id' => $syncId, 'routes_id' => $routeId, 'status' => 'failed']);
-    if ($DB->affectedRows() > 0)
-    {
-        Session::addMessageAfterRedirect('Asset queued for the next scheduled sync.');
-    }
+    ], $retryCriteria);
+    $queued = $DB->affectedRows();
+    $message = match ($queued) {
+        0 => 'No failed assets were available to queue.',
+        1 => 'One failed asset queued for the next scheduled sync.',
+        default => "$queued failed assets queued for the next scheduled sync.",
+    };
+    Session::addMessageAfterRedirect($message);
     Html::redirect($syncUrl . '&route_id=' . $routeId, 303);
 }
 $statusFilter = $_GET['sync_status'] ?? '';

@@ -1,5 +1,6 @@
 <?php
 
+use GlpiPlugin\Assetsynccontroller\Access;
 use GlpiPlugin\Assetsynccontroller\BillingConfiguration;
 use GlpiPlugin\Assetsynccontroller\LocalAccount;
 use GlpiPlugin\Assetsynccontroller\SyncFlags;
@@ -69,7 +70,7 @@ function plugin_assetsynccontroller_install(): bool
 
     SyncFlags::install();
     return SyncRunner::install() && plugin_assetsynccontroller_install_delete_cascades()
-        && SyncTask::register() && BillingConfiguration::registerTask();
+        && SyncTask::register() && BillingConfiguration::registerTask() && Access::install();
 }
 
 function plugin_assetsynccontroller_install_delete_cascades(): bool
@@ -122,6 +123,7 @@ function plugin_assetsynccontroller_uninstall(): bool
 {
     global $DB;
 
+    Access::uninstall();
     BillingConfiguration::uninstall();
     SyncFlags::uninstall();
     SyncRunner::uninstall();
