@@ -15,7 +15,7 @@ final class Profile extends CommonGLPI
             return '';
         }
 
-        return self::createTabEntry('Asset Sync Controller', icon: 'ti ti-lock');
+        return self::createTabEntry(PLUGIN_ASSETSYNCCONTROLLER_NAME, icon: 'ti ti-lock');
     }
 
     public static function displayTabContentForItem(CommonGLPI $item, $tabnum = 1, $withtemplate = 0)
@@ -42,7 +42,7 @@ final class Profile extends CommonGLPI
         echo '<input type="hidden" name="id" value="' . (int) $item->getID() . '">';
         echo '<p class="text-secondary">Select View for each section that should appear in the menu. Select View and Manage to allow changes in that section.</p>';
         $item->displayRightsChoiceMatrix($rights, [
-            'title' => 'Asset Sync Controller access',
+            'title' => PLUGIN_ASSETSYNCCONTROLLER_NAME . ' access',
             'canedit' => $canEdit,
         ]);
         if ($canEdit)

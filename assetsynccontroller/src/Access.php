@@ -38,7 +38,7 @@ final class Access
     {
         if (!self::canRead($section))
         {
-            throw new AccessDeniedHttpException('Your GLPI profile cannot view this Asset Sync Controller section.');
+            throw new AccessDeniedHttpException('Your GLPI profile cannot view this ' . PLUGIN_ASSETSYNCCONTROLLER_NAME . ' section.');
         }
     }
 
@@ -46,7 +46,7 @@ final class Access
     {
         if (!self::canUpdate($section))
         {
-            throw new AccessDeniedHttpException('Your GLPI profile cannot manage this Asset Sync Controller section.');
+            throw new AccessDeniedHttpException('Your GLPI profile cannot manage this ' . PLUGIN_ASSETSYNCCONTROLLER_NAME . ' section.');
         }
     }
 

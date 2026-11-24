@@ -27,7 +27,7 @@ class SyncTask
 
     public static function cronInfo(string $name): array
     {
-        return ['description' => 'Sync assets on enabled Asset Sync Controller routes'];
+        return ['description' => 'Sync assets on enabled ' . PLUGIN_ASSETSYNCCONTROLLER_NAME . ' routes'];
     }
 
     public static function cronAssetSync(CronTask $task): int

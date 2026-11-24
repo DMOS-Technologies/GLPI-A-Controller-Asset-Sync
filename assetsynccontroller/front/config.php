@@ -18,11 +18,11 @@ $sections = Access::visibleSections();
 $selectedSection = $_GET['section'] ?? array_key_first($sections);
 if ($selectedSection === null)
 {
-    throw new AccessDeniedHttpException('Your profile has no access to Asset Sync Controller.');
+    throw new AccessDeniedHttpException('Your profile has no access to ' . PLUGIN_ASSETSYNCCONTROLLER_NAME . '.');
 }
 if (!is_string($selectedSection) || !isset(Access::SECTIONS[$selectedSection]))
 {
-    throw new NotFoundHttpException('Asset Sync Controller section not found.');
+    throw new NotFoundHttpException(PLUGIN_ASSETSYNCCONTROLLER_NAME . ' section not found.');
 }
 // Check explicit links as well as visible tabs.
 Access::checkRead($selectedSection);
@@ -56,7 +56,7 @@ elseif ($selectedSection === 'billing-configuration')
 Html::header(PLUGIN_ASSETSYNCCONTROLLER_NAME, '', 'config', Menu::class);
 ?>
 
-<nav class="nav nav-tabs flex-wrap" aria-label="Asset Sync Controller sections">
+<nav class="nav nav-tabs flex-wrap" aria-label="<?= htmlescape(PLUGIN_ASSETSYNCCONTROLLER_NAME . ' sections') ?>">
     <?php foreach ($sections as $sectionKey => $sectionLabel): ?>
         <?php $isSelectedSection = ($sectionKey === $selectedSection); ?>
         <a class="nav-link<?= $isSelectedSection ? ' active' : '' ?>"

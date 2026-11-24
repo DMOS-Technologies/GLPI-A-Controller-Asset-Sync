@@ -4,7 +4,7 @@ use Glpi\Plugin\Hooks;
 use GlpiPlugin\Assetsynccontroller\Menu;
 use GlpiPlugin\Assetsynccontroller\Profile as ControllerProfile;
 
-const PLUGIN_ASSETSYNCCONTROLLER_NAME = 'Asset Sync Controller';
+const PLUGIN_ASSETSYNCCONTROLLER_NAME = 'DMOS AssetSync - Master';
 const PLUGIN_ASSETSYNCCONTROLLER_CONNECTIONS_TABLE = 'glpi_plugin_assetsynccontroller_connections';
 const PLUGIN_ASSETSYNCCONTROLLER_ROUTES_TABLE = 'glpi_plugin_assetsynccontroller_routes';
 const PLUGIN_ASSETSYNCCONTROLLER_MAPPINGS_TABLE = 'glpi_plugin_assetsynccontroller_mappings';
@@ -37,7 +37,7 @@ function plugin_version_assetsynccontroller(): array
 {
     return [
         'name' => PLUGIN_ASSETSYNCCONTROLLER_NAME,
-        'version' => '0.21.0',
+        'version' => '0.21.1',
         'requirements' => [
             'glpi' => [
                 'min' => '11.0.0',
