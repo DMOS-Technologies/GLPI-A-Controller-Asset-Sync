@@ -501,32 +501,34 @@ class SyncPlan
 
         $timeA = $a['modified_at'] ?? null;
         $timeB = $b['modified_at'] ?? null;
-        if (!is_int($timeA) || !is_int($timeB) || $timeA === $timeB)
+        $hasHistoryA = is_int($timeA);
+        $hasHistoryB = is_int($timeB);
+
+        // When only one side has a recorded field edit, use that side's value.
+        if ($hasHistoryA !== $hasHistoryB)
+        {
+            return $hasHistoryA ? 'a_to_b' : 'b_to_a';
+        }
+
+        $bothMissing = !$hasHistoryA && !$hasHistoryB;
+        if ($bothMissing || $timeA === $timeB)
         {
             if ($onTie !== null)
             {
                 // Notes can merge safely without deleting either version.
                 return $onTie;
             }
-            $sameTime = is_int($timeA) && is_int($timeB);
-            $missing = match (true) {
-                !is_int($timeA) && !is_int($timeB) => 'GLPI A and GLPI B',
-                !is_int($timeA) => 'GLPI A',
-                default => 'GLPI B',
-            };
             // Do not guess which value should win when history cannot establish the order.
             throw new SyncProblem(
-                $sameTime ? 'Two-way sync conflict. Both edits have the same recorded time.'
-                    : "Two-way sync conflict. A field edit time is missing on $missing.",
+                $bothMissing ? 'Two-way sync conflict. A field edit time is missing on GLPI A and GLPI B.'
+                    : 'Two-way sync conflict. Both edits have the same recorded time.',
                 details: [
                     'field_a' => self::fieldLabel($fieldA),
                     'field_b' => self::fieldLabel($fieldB),
-                    'reason' => $sameTime
-                        ? 'The mapped values differ, but both fields have the same edit time in History. Newer Edit Wins cannot choose which value to keep.'
-                        : "The mapped values differ, but $missing has no usable timestamp for its field edit in History. Newer Edit Wins cannot choose which value to keep.",
-                    'next_step' => $sameTime
-                        ? 'Make a new edit on the side whose value should win and retry. To keep that side authoritative, set a one-way direction in Mappings.'
-                        : 'Choose the side whose value should win, set that one-way direction in Mappings, and retry.',
+                    'reason' => $bothMissing
+                        ? 'The mapped values differ, but neither side has a usable field edit time in History. Newer Edit Wins cannot choose which value to keep.'
+                        : 'The mapped values differ, but both fields have the same edit time in History. Newer Edit Wins cannot choose which value to keep.',
+                    'next_step' => 'Make a new edit on the side whose value should win and retry. To keep that side authoritative, set a one-way direction in Mappings.',
                 ],
             );
         }
