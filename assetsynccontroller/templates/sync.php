@@ -136,16 +136,21 @@
                                         default => null,
                                     };
                                     $value = $failure['value'] ?? null;
+                                    $attemptedFields = $failure['fields'] ?? [];
+                                    $attemptedFields = is_array($attemptedFields) ? array_filter($attemptedFields, 'is_string') : [];
                                     $detailRows = array_filter([
                                         'Destination' => $side,
                                         'Field' => $failure['field'] ?? null,
                                         'GLPI A field' => $failure['field_a'] ?? null,
                                         'GLPI B field' => $failure['field_b'] ?? null,
                                         'Attempted value' => $value === '' ? '(empty)' : $value,
+                                        'Group' => $failure['group'] ?? null,
+                                        'Fields attempted' => $attemptedFields,
                                         'Reason' => $failure['reason'] ?? null,
                                         'What to do next' => $failure['next_step']
                                             ?? \GlpiPlugin\Assetsynccontroller\SyncProblem::storedGuidance($row['last_error'] ?? ''),
-                                    ], static fn($detail): bool => is_string($detail) && $detail !== '');
+                                    ], static fn($detail, string $label): bool => $label === 'Fields attempted'
+                                        ? $detail !== [] : is_string($detail) && $detail !== '', ARRAY_FILTER_USE_BOTH);
                                     ?>
                                     <details class="mt-2">
                                         <summary class="btn btn-sm btn-outline-secondary d-inline-flex">See Details</summary>
@@ -155,7 +160,19 @@
                                                 <dl class="mb-0">
                                                     <?php foreach ($detailRows as $label => $detail): ?>
                                                         <dt><?= htmlescape($label) ?></dt>
-                                                        <dd class="text-break"><?= htmlescape($detail) ?></dd>
+                                                        <?php if (is_array($detail)): ?>
+                                                            <dd>
+                                                                <ul class="mb-0 ps-3">
+                                                                    <?php foreach ($detail as $field): ?>
+                                                                        <li class="text-break"><?= htmlescape($field) ?></li>
+                                                                    <?php endforeach; ?>
+                                                                </ul>
+                                                            </dd>
+                                                        <?php elseif ($label === 'Attempted value'): ?>
+                                                            <dd class="text-break" style="white-space: pre-wrap"><?= htmlescape($detail) ?></dd>
+                                                        <?php else: ?>
+                                                            <dd class="text-break"><?= htmlescape($detail) ?></dd>
+                                                        <?php endif; ?>
                                                     <?php endforeach; ?>
                                                 </dl>
                                             <?php endif; ?>

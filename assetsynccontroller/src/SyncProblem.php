@@ -27,19 +27,84 @@ class SyncProblem extends RuntimeException
         }
 
         $details = ['field' => self::shortLabel($name), 'side' => $side];
-        // Show only submitted portable values, without structured references or entire payloads.
-        if (is_scalar($value))
+        if ($value !== null)
         {
-            $label = is_bool($value) ? ($value ? 'Yes' : 'No') : (string) $value;
-            $details['value'] = self::shortLabel($label);
-        }
-        elseif (is_array($value) && array_is_list($value)
-            && count(array_filter($value, 'is_string')) === count($value))
-        {
-            $details['value'] = self::shortLabel(implode(', ', $value));
+            $details['value'] = self::attemptedValue($field, $value);
         }
 
         return new self($message, details: $details);
+    }
+
+    public static function attemptedValue(array $destination, mixed $value, array $sources = []): string
+    {
+        // A saved failure can outlive its mapping. Check source and destination metadata before storing a value.
+        foreach ([$destination, ...$sources] as $field)
+        {
+            $fieldNames = implode(' ', [
+                $field['field'] ?? '',
+                $field['linkfield'] ?? '',
+                $field['table'] ?? '',
+                $field['name'] ?? '',
+                $field['uid'] ?? '',
+            ]);
+            if (in_array($field['datatype'] ?? '', ['weblink', 'url'], true)
+                || preg_match('/password|passphrase|secret|token|credential|api[ _-]*key|private[ _-]*key|access[ _-]*key|license[ _-]*key|url/i', $fieldNames))
+            {
+                return '(hidden for privacy)';
+            }
+            if (SyncNotes::isField($field))
+            {
+                if (!is_array($value))
+                {
+                    return '(note content hidden)';
+                }
+                $count = count($value);
+                return $count === 1 ? '1 note (content hidden)' : "$count notes (content hidden)";
+            }
+        }
+
+        if (is_bool($value))
+        {
+            return $value ? 'Yes' : 'No';
+        }
+        if ($value === null)
+        {
+            return '';
+        }
+        if (is_array($value))
+        {
+            $itemLabel = $value['label'] ?? null;
+            $itemSerial = $value['serial'] ?? null;
+            if (is_string($itemLabel) && trim($itemLabel) !== '')
+            {
+                // A linked item is represented by its display label instead of the structured payload.
+                $value = $itemLabel;
+            }
+            elseif (is_string($itemSerial) && trim($itemSerial) !== '')
+            {
+                $value = $itemSerial;
+            }
+            elseif (array_is_list($value) && count(array_filter($value, 'is_string')) === count($value))
+            {
+                $value = implode(', ', $value);
+            }
+        }
+        if (!is_scalar($value))
+        {
+            return '(value could not be displayed)';
+        }
+
+        $label = (string) $value;
+        // A normal text field can still contain a URL with embedded credentials.
+        if (preg_match('~https?://[^/\s]+@|[?&#](?:[^=&#\s]*(?:password|token|secret|credential)|api[_-]?key)=~i', $label))
+        {
+            return '(hidden for privacy)';
+        }
+        if ($label !== '' && trim($label) === '')
+        {
+            return '(whitespace only)';
+        }
+        return self::shortLabel($label);
     }
 
     private static function shortLabel(string $label): string

@@ -243,17 +243,16 @@ class AgentApi
         }
         if ($payload !== null)
         {
-            // An HTTP error can report a field ID, but it can never acknowledge a write.
+            // Preserve diagnostics on an HTTP error without treating it as a write acknowledgement.
             $response = json_decode($body, true);
             $error = $response['error'] ?? null;
             if (is_string($error))
             {
                 $failure = ['ok' => false, 'error' => $error];
-                $fieldId = $response['field_id'] ?? null;
-                if (($payload['include_error_details'] ?? false) === true && is_int($fieldId) && $fieldId > 0
-                    && in_array($error, ['reference_unavailable', 'invalid_reference_value'], true))
+                if (($payload['include_error_details'] ?? false) === true)
                 {
-                    $failure['field_id'] = $fieldId;
+                    $detailKeys = ['field_id', 'column', 'reason', 'group', 'field_ids', 'columns'];
+                    $failure += array_intersect_key($response, array_flip($detailKeys));
                 }
                 return json_encode($failure, JSON_THROW_ON_ERROR);
             }

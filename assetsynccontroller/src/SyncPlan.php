@@ -95,6 +95,8 @@ class SyncPlan
         $valuesB = $probe['values'] ?? [];
         $writeA = [];
         $writeB = [];
+        // Keep source descriptors locally so a remapped credential is still hidden in a failure.
+        $sourcesForB = [];
         $expectedB = [];
         $writtenB = [];
         // Keep the comparison baseline for mappings that were not part of this run.
@@ -106,6 +108,7 @@ class SyncPlan
             $idB = (int) $mapping['agent_option_id'];
             $direction = $mapping['direction'];
             $key = $idA . ':' . $idB . ':' . $direction;
+            $sourcesForB[$idB][] = $fieldsA[$idA];
 
             if (!array_key_exists('value', $valuesA[$idA] ?? [])
                 || (!$create && !array_key_exists('value', $valuesB[$idB] ?? [])))
@@ -203,7 +206,7 @@ class SyncPlan
                     {
                         $expectedB[$idB] = ['field' => $fieldsB[$idB], 'value' => $b];
                         self::addWrite($writeB, $fieldsB[$idB], $a);
-                        $b = $typeB === null ? $a : self::destinationValue($a, $typeB, $fieldsB[$idB], 'b');
+                        $b = $typeB === null ? $a : self::destinationValue($a, $typeB, $fieldsB[$idB], 'b', $fieldsA[$idA]);
                         $writtenB[$key] = $idB;
                     }
                 }
@@ -213,7 +216,7 @@ class SyncPlan
                     {
                         $expectedB[$idB] = ['field' => $fieldsB[$idB], 'value' => $b];
                         self::addWrite($writeA, $fieldsA[$idA], $b);
-                        $a = self::destinationValue($b, $valuesA[$idA]['kind'], $fieldsA[$idA], 'a');
+                        $a = self::destinationValue($b, $valuesA[$idA]['kind'], $fieldsA[$idA], 'a', $fieldsB[$idB]);
                     }
                 }
                 elseif ($direction !== null)
@@ -289,7 +292,9 @@ class SyncPlan
             {
                 $initialById[$entryToCopy['field']['id']] = $entryToCopy;
             }
-            self::checkResponse($result, $fieldsB + $flagFields, $writeB + $initialById);
+            // A response can name a pending write or a field read for the update's precondition.
+            $expectedFields = array_map(static fn(array $entry): array => $entry['field'], $expectedB);
+            self::checkResponse($result, $expectedFields, $writeB + $initialById, $initialNative, $sourcesForB);
             if (!is_int($result['asset_id'] ?? null) || $result['asset_id'] <= 0
                 || (!$create && $result['asset_id'] !== $expectedAssetId))
             {
@@ -564,31 +569,51 @@ class SyncPlan
         $writes[$id] = ['field' => $field, 'value' => $value];
     }
 
-    private static function destinationValue(mixed $value, string $kind, array $field, string $side): mixed
+    private static function destinationValue(mixed $value, string $kind, array $field, string $side, array $source): mixed
     {
         try
         {
             return SyncValue::forType($value, $kind);
         }
-        catch (SyncException $problem)
+        catch (SyncException)
         {
             $destination = $side === 'a' ? 'GLPI A' : 'GLPI B';
-            $nextStep = 'Check the mapped source value and the expected field type on the destination.';
-            if (in_array($kind, ['dropdown', 'dropdown_list'], true))
+            $type = match ($kind) {
+                'boolean' => 'a Yes/No value',
+                'date' => 'a valid date',
+                'datetime' => 'a valid date and time',
+                'dropdown' => 'a single dropdown option',
+                'dropdown_list' => 'a list of dropdown options',
+                'integer' => 'a whole number',
+                'number' => 'a number',
+                'text' => 'text',
+                default => 'a value of its configured type',
+            };
+            $message = in_array($kind, ['dropdown', 'dropdown_list'], true)
+                ? "$destination could not convert the attempted dropdown value."
+                : "$destination cannot use this value for the mapped field type.";
+            $reason = "The destination expects $type. Controller A could not convert the value.";
+            if ($side === 'b')
             {
-                $message = "$destination could not convert the attempted dropdown value.";
-                $details = SyncProblem::dropdown($message, $side, $field, $value)->details;
-                throw new SyncProblem($message, details: $details + ['next_step' => $nextStep]);
+                $reason .= ' The sync stopped before sending the value to GLPI B.';
             }
-            throw new SyncProblem("$destination cannot use this value for the mapped field type.", details: [
-                'field' => self::fieldLabel($field),
+            throw new SyncProblem($message, details: [
+                'field' => self::fieldLabel($field, $side === 'b' ? ($field['id'] ?? null) : null),
                 'side' => $side,
-                'next_step' => $nextStep,
+                'value' => SyncProblem::attemptedValue($field, $value, [$source]),
+                'reason' => $reason,
+                'next_step' => 'Check the mapped source value and the expected field type on the destination.',
             ]);
         }
     }
 
-    private static function checkResponse(?array $result, array $fields, array $writes = []): void
+    private static function checkResponse(
+        ?array $result,
+        array $fields,
+        array $writes = [],
+        array $initialNative = [],
+        array $sources = [],
+    ): void
     {
         if (($result['ok'] ?? false) === true)
         {
@@ -609,6 +634,7 @@ class SyncPlan
             'field_write_failed' => ['GLPI B could not save a mapped field.', 'Check the destination field settings, including any required fields. If retry still fails, check the GLPI B logs.'],
             'invalid_field_value' => ['GLPI B rejected a value for a mapped field.', 'Check the required format and allowed values for the destination field.'],
             'invalid_reference_value' => ['GLPI B rejected the format of a mapped reference value.', 'Check whether the destination expects a single dropdown option, multiple options, or a linked record.'],
+            'notes_write_failed' => ['GLPI B could not save the copied Notes.', 'Check the Agent B account’s Notes permissions for this asset and review the GLPI B logs.'],
             'reference_unavailable' => ['GLPI B could not find a unique match for a mapped dropdown option or linked record.', 'Check that the matching option or record exists and is visible in the destination entity. Resolve any duplicate matches before retrying.'],
             'unmapped_field_changed' => ['A GLPI B rule or plugin changed a field outside this mapping. The write was rolled back.', 'Review the asset rules or plugin settings on GLPI B before retrying.'],
             'batch_payload_too_large', 'request_too_large' => ['The mapped data exceeds the Agent B request limit.', 'Check for unusually large mapped values, such as long notes, and reduce the data included in the sync.'],
@@ -617,23 +643,96 @@ class SyncPlan
             default => ['Agent B did not return a usable response for this asset.', 'Check the connection and Agent B availability. If it keeps failing, check the GLPI B logs and plugin versions.'],
         };
         $details = ['next_step' => $nextStep];
-        // The Agent identifies a failed option. Its name and planned value come from this request.
-        $fieldId = $result['field_id'] ?? null;
-        if (is_int($fieldId) && in_array($error, ['reference_unavailable', 'invalid_reference_value', 'invalid_field_value'], true))
+        if (in_array($error, [
+            'reference_unavailable', 'invalid_reference_value', 'invalid_field_value',
+            'field_read_only', 'field_unavailable', 'field_write_failed', 'notes_write_failed',
+        ], true))
         {
-            $write = $writes[$fieldId] ?? [];
-            $field = $write['field'] ?? $fields[$fieldId] ?? null;
-            if ($field !== null)
-            {
-                $details += SyncProblem::dropdown($message, 'b', $field, $write['value'] ?? null)->details;
-            }
+            $details += self::agentFailureDetails($result, $fields, $writes, $initialNative, $sources);
+        }
+        if (isset($details['group']))
+        {
+            $details['next_step'] = 'Review the group’s required fields and allowed formats on GLPI B.';
         }
         throw new SyncProblem($message, details: $details);
     }
 
-    private static function fieldLabel(array $field): string
+    private static function agentFailureDetails(array $result, array $fields, array $writes, array $initialNative, array $sources): array
     {
-        return mb_substr((string) ($field['name'] ?? $field['field'] ?? 'Unknown field'), 0, 500);
+        $details = [];
+        $reason = self::agentLabel($result['reason'] ?? null);
+        if ($reason !== null)
+        {
+            $details['reason'] = $reason;
+        }
+
+        // Names and values for mapped fields come from the request, never from the Agent's response.
+        $fieldId = $result['field_id'] ?? null;
+        $field = is_int($fieldId) && $fieldId > 0 ? ($writes[$fieldId]['field'] ?? $fields[$fieldId] ?? null) : null;
+        $column = $result['column'] ?? null;
+        if ($field !== null)
+        {
+            $details['field'] = self::fieldLabel($field, $fieldId);
+            if (isset($writes[$fieldId]))
+            {
+                $details['value'] = SyncProblem::attemptedValue($field, $writes[$fieldId]['value'], $sources[$fieldId] ?? []);
+            }
+        }
+        elseif (is_string($column) && array_key_exists($column, $initialNative))
+        {
+            $details['field'] = self::columnLabel($column);
+            $field = ['field' => $column, 'name' => $details['field']];
+            $details['value'] = SyncProblem::attemptedValue($field, $initialNative[$column]);
+        }
+
+        $group = self::agentLabel($result['group'] ?? null);
+        if ($group !== null)
+        {
+            $details['group'] = $group;
+            $labels = [];
+            $fieldIds = $result['field_ids'] ?? [];
+            $columns = $result['columns'] ?? [];
+            foreach (is_array($fieldIds) && array_is_list($fieldIds) ? $fieldIds : [] as $id)
+            {
+                if (is_int($id) && $id > 0 && isset($writes[$id]))
+                {
+                    $labels[] = self::fieldLabel($writes[$id]['field'], $id);
+                }
+            }
+            foreach (is_array($columns) && array_is_list($columns) ? $columns : [] as $seedColumn)
+            {
+                if (is_string($seedColumn) && array_key_exists($seedColumn, $initialNative))
+                {
+                    $labels[] = self::columnLabel($seedColumn);
+                }
+            }
+            $details['fields'] = array_values(array_unique($labels));
+        }
+        return $details === [] ? [] : ['side' => 'b'] + $details;
+    }
+
+    private static function agentLabel(mixed $label): ?string
+    {
+        if (!is_string($label))
+        {
+            return null;
+        }
+        $label = trim(preg_replace('/[\x00-\x1f\x7f]+/', ' ', $label));
+        return $label === '' ? null : mb_substr($label, 0, 500);
+    }
+
+    private static function columnLabel(string $column): string
+    {
+        return match ($column) {
+            'otherserial' => 'Inventory/Asset Number',
+            default => ucwords(str_replace('_', ' ', $column)),
+        };
+    }
+
+    private static function fieldLabel(array $field, ?int $id = null): string
+    {
+        $label = mb_substr((string) ($field['name'] ?? $field['field'] ?? 'Unknown field'), 0, 500);
+        return $id === null ? $label : "$label (#$id)";
     }
 
     private static function fingerprint(mixed $value): string
