@@ -68,6 +68,7 @@ class SyncPlan
             'operation' => 'probe',
             'fields' => array_values($fieldsB + $flagFields),
             'include_error_details' => true,
+            'include_unresolved_dropdowns' => true,
         ]);
         self::checkResponse($probe, $fieldsB + $flagFields);
         if (!is_bool($probe['exists'] ?? null))
@@ -123,18 +124,33 @@ class SyncPlan
 
             $a = $valuesA[$idA]['value'];
             $b = $create ? null : $valuesB[$idB]['value'];
+            $typeB = $valuesB[$idB]['kind'] ?? null;
+            // A fixed A-to-B mapping must fill a blank dropdown even if an old snapshot records the mismatch.
+            $fillBlankDropdownFromA = $direction === 'a_to_b' && $b === null && $typeB === 'dropdown';
             $notesA = $valuesA[$idA]['kind'] === 'notes';
             $notesB = SyncNotes::isField($fieldsB[$idB]);
-            if ($notesA || $notesB)
+            if ($notesA !== $notesB)
             {
-                if (!$notesA || !$notesB)
-                {
-                    throw new SyncProblem('The Notes field is mapped to a different field type.', details: [
-                        'field_a' => self::fieldLabel($fieldsA[$idA]),
-                        'field_b' => self::fieldLabel($fieldsB[$idB]),
-                        'next_step' => 'Select Notes on both sides of the mapping, then retry.',
-                    ]);
-                }
+                throw new SyncProblem('The Notes field is mapped to a different field type.', details: [
+                    'field_a' => self::fieldLabel($fieldsA[$idA]),
+                    'field_b' => self::fieldLabel($fieldsB[$idB]),
+                    'next_step' => 'Select Notes on both sides of the mapping, then retry.',
+                ]);
+            }
+
+            if (is_array($b) && array_key_exists('unresolved_dropdown', $b))
+            {
+                $replacement = self::unresolvedDropdownReplacement(
+                    $direction, $valuesA[$idA], $valuesB[$idB], $fieldsA[$idA], $fieldsB[$idB],
+                );
+                // B checks the marker under its lock. Only the replacement becomes a synced value.
+                $expectedB[$idB] = ['field' => $fieldsB[$idB], 'value' => $b];
+                self::addWrite($writeB, $fieldsB[$idB], $replacement);
+                $b = $replacement;
+                $writtenB[$key] = $idB;
+            }
+            elseif ($notesA)
+            {
                 if (!$create && ($valuesB[$idB]['kind'] ?? null) !== 'notes')
                 {
                     throw new SyncProblem('Agent B did not return a Notes collection.', details: [
@@ -181,8 +197,7 @@ class SyncPlan
                 $snapshot[$key] = ['a' => self::fingerprint($a), 'b' => self::fingerprint($b)];
                 continue;
             }
-
-            if ($create)
+            elseif ($create)
             {
                 // New B assets are seeded from A. Ownership rules apply once both records exist.
                 if ($a !== null && $a !== '' && $a !== [])
@@ -193,7 +208,7 @@ class SyncPlan
                 }
             }
             elseif (self::fingerprint($a) !== self::fingerprint($b)
-                && !self::matchesSnapshot($a, $b, $previous[$key] ?? null))
+                && ($fillBlankDropdownFromA || !self::matchesSnapshot($a, $b, $previous[$key] ?? null)))
             {
                 if ($direction === 'newer_edit')
                 {
@@ -201,7 +216,6 @@ class SyncPlan
                 }
                 if ($direction === 'a_to_b')
                 {
-                    $typeB = $valuesB[$idB]['kind'] ?? null;
                     if (!self::matchesDestination($a, $b, $typeB))
                     {
                         $expectedB[$idB] = ['field' => $fieldsB[$idB], 'value' => $b];
@@ -470,6 +484,52 @@ class SyncPlan
         }
     }
 
+    private static function unresolvedDropdownReplacement(
+        string $direction,
+        array $a,
+        array $b,
+        array $fieldA,
+        array $fieldB,
+    ): string
+    {
+        $details = ['side' => 'b', 'field' => self::fieldLabel($fieldB, $fieldB['id'])];
+        $marker = $b['value'];
+        $token = $marker['unresolved_dropdown'];
+        if (($b['kind'] ?? null) !== 'dropdown' || SyncNotes::isField($fieldB) || count($marker) !== 1
+            || !is_string($token) || preg_match('/\A[0-9a-f]{64}\z/', $token) !== 1)
+        {
+            throw new SyncProblem('Agent B returned an invalid dropdown recovery value.', details: $details + [
+                'next_step' => 'Check the Agent B plugin version and its logs, then retry.',
+            ]);
+        }
+
+        if ($direction === 'newer_edit')
+        {
+            // A snapshot cannot tell when an unavailable option stopped resolving. Use field history.
+            $direction = self::newerDirection($a, $b, null, $fieldA, $fieldB, 'conflict');
+        }
+        if ($direction !== 'a_to_b')
+        {
+            $reason = $direction === 'b_to_a'
+                ? 'The mapping selects GLPI B, and its stored option is unavailable.'
+                : 'Field history cannot establish that the GLPI A value should win.';
+            throw new SyncProblem('GLPI B has an unavailable dropdown option.', details: $details + [
+                'reason' => $reason,
+                'next_step' => 'Review the field history and choose GLPI A as the source of truth if its value is intended.',
+            ]);
+        }
+
+        $replacement = self::destinationValue($a['value'], 'dropdown', $fieldB, 'b', $fieldA);
+        if ($replacement === null)
+        {
+            throw new SyncProblem('GLPI B has an unavailable dropdown option.', details: $details + [
+                'reason' => 'Replacing the unavailable option requires a nonblank value from GLPI A.',
+                'next_step' => 'Set the intended option on the mapped GLPI A field and retry sync.',
+            ]);
+        }
+        return $replacement;
+    }
+
     private static function newerDirection(
         array $a,
         array $b,
@@ -515,7 +575,7 @@ class SyncPlan
         {
             if ($onTie !== null)
             {
-                // Notes can merge safely without deleting either version.
+                // Notes can merge. Dropdown recovery requires a clear winner.
                 return $onTie;
             }
             // Do not guess which value should win when history cannot establish the order.

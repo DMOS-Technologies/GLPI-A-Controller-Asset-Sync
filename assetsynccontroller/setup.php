@@ -37,7 +37,7 @@ function plugin_version_assetsynccontroller(): array
 {
     return [
         'name' => PLUGIN_ASSETSYNCCONTROLLER_NAME,
-        'version' => '0.21.3',
+        'version' => '0.21.4',
         'requirements' => [
             'glpi' => [
                 'min' => '11.0.0',
